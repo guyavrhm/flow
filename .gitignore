@@ -1,0 +1,8 @@
+/__pycache__
+/.idea
+*.dll
+*.exe
+*.so
+*.pyc
+*.db
+.vs
