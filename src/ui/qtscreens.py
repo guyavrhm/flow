@@ -96,14 +96,10 @@ class MovingScreen(QGraphicsRectItem):
         """
         Snaps released screen and updates attachments.
         """
-        print("machines:", len(Server.machines))
-        print("screens:", len(self.view.screens))
         app.instance().setOverrideCursor(Qt.OpenHandCursor)
         self.snap()
         self.setZValue(0)
         self.view.updateAttachments()
-        for s in self.view.screens.values():
-            print(s.name, s.attachments)
 
     def centerX(self):
         return (self.pos().x() + (self.pos().x() + self.w)) / 2
