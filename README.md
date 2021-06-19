@@ -38,13 +38,13 @@ flow sends data through the local network, fast and securly, for you to have an 
 #### Binary Release:
 
 *   #### Windows:
-    1. Download the installer from [here](https://github.com/guyavrhm/flow/releases/download/v1.0.0/flow.v1.0.0.setup.exe).
+    1. Download the installer from [here](https://github.com/guyavrhm/flow/releases/download/v1.0.1/flow.v1.0.1.setup.exe).
     2. Run the installer to install flow on your machine.
     3. A shortcut to flow will appear on your desktop.
 
 *   #### Linux:
-    1. Download the [tar.gz](https://github.com/guyavrhm/flow/releases/download/v1.0.0/flow-1.0.0.tar.gz) file.
-    2. `$ tar -xzf flow-1.0.0.tar.gz`
+    1. Download the [tar.gz](https://github.com/guyavrhm/flow/releases/download/v1.0.1/flow-1.0.1.tar.gz) file.
+    2. `$ tar -xzf flow-1.0.1.tar.gz`
     3. `$ ./setup.sh`
     4. flow will be in your applications.
 
