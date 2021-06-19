@@ -3,7 +3,6 @@ File containing static methods used to obtain machine information.
 """
 
 from sys import platform
-from scapy.all import get_if_addr, conf
 import subprocess
 import re
 
@@ -49,4 +48,22 @@ def get_ip():
     """
     Returns local IP of computer.
     """
-    return get_if_addr(conf.iface)
+    if platform == WINDOWS:
+        output = subprocess.check_output('ipconfig', shell=True).decode().split('\r\n')
+        ips = [output[i - 2].split(': ')[-1] for i, n in enumerate(output) if 'Default Gateway' in n if n[-1].isdigit()]
+
+    elif platform == LINUX:
+        output = subprocess.check_output('ip addr', shell=True).decode().split('    ')
+        ips = [n.split()[1].split("/")[0] for n in output if 'inet ' in n]
+    
+    elif platform == MACOS:
+        output = subprocess.check_output('ifconfig', shell=True).decode().split('\t')
+        ips = [n.split()[1] for n in output if 'inet ' in n]
+
+    else:
+        return None
+
+    if len(ips) == 0:
+        return 'Not Found'
+    else:
+        return ips[-1]
