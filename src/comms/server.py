@@ -189,9 +189,12 @@ class Server(flowThread):
 
                 prev = self.current
                 self.current = other
+                
+                if self.devices != None:
+                    self.devices.pause()
 
                 if self.current.is_server():
-                    self.devices.pause()
+                    self.devices = None
                     self.hide_blocker_signal.emit()
                     prev.pass_to(self.current)
 
