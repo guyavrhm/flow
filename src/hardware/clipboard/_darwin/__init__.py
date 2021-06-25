@@ -20,11 +20,11 @@ class MacOSClipboard:
         """
         Returns clipboard data.
         """
-        files = subprocess.check_output([GET_FILES_MAC], shell=True).decode()
+        files = subprocess.check_output(GET_FILES_MAC).decode()
         if len(files) != 1:
             out = tuple(files.split("\n")[:-1])
         else:
-            out = subprocess.check_output(MPASTE, shell=True).decode()
+            out = subprocess.check_output(MPASTE).decode()
         return out
 
     @staticmethod
@@ -32,5 +32,4 @@ class MacOSClipboard:
         """
         Sets plain text to the clipboard.
         """
-        data = data.replace('"', '\\"')
-        subprocess.call(f'{MCOPY} "{data}"', shell=True)
+        subprocess.call([MCOPY, data])

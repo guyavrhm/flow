@@ -21,7 +21,7 @@ class LinuxClipboard:
         Returns clipboard data.
         """
         try:
-            out = subprocess.check_output(XPASTE, stderr=subprocess.STDOUT, shell=True).decode()
+            out = subprocess.check_output(XPASTE, stderr=subprocess.STDOUT).decode()
         except subprocess.CalledProcessError:
             out = 'unknown format'
         return out
@@ -29,7 +29,7 @@ class LinuxClipboard:
     @staticmethod
     def set_text(data):
         """
-        Sets plain text to the clipboard.
+        Sets plain textf to the clipboard.
         """
         data = data.replace('"', '\\"')
-        subprocess.call(f'{XCOPY} "{data}"', shell=True)
+        subprocess.call([XCOPY, data])
