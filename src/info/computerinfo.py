@@ -6,6 +6,8 @@ from sys import platform
 import subprocess
 import re
 
+from src.files import WINRES, MACRES, LINRES
+
 WINDOWS = 'win32'
 LINUX = 'linux'
 MACOS = 'darwin'
@@ -23,20 +25,19 @@ def get_screeninfo():
     Returns screen resolution of computer.
     """
     if platform == WINDOWS:
-        output = subprocess.check_output("wmic path Win32_VideoController get CurrentHorizontalResolution,"
-                                         "CurrentVerticalResolution", shell=True)
+        output = subprocess.check_output(f'"{WINRES}"', shell=True)
         resolution = re.findall("[0-9]+", output.decode())
         resolutions = [(resolution[i], resolution[i + 1]) for i in range(0, len(resolution) - 1, 2)]
 
     elif platform == LINUX:
-        output = subprocess.check_output("xrandr | grep '*'", shell=True)
+        output = subprocess.check_output(LINRES, shell=True)
         resolution = re.findall("[0-9]+x[0-9]+", output.decode())
         resolutions = [tuple(res.split("x")) for res in resolution]
 
     elif platform == MACOS:
-        output = subprocess.check_output("system_profiler SPDisplaysDataType | grep Resolution", shell=True)
-        resolution = re.findall("[0-9]+ x [0-9]+", output.decode())
-        resolutions = [tuple(res.split(" x ")) for res in resolution]
+        output = subprocess.check_output(MACRES, shell=True)
+        resolution = [float(r) for r in output.decode().split("\n")[:-1]]
+        resolutions = [resolution]
 
     else:
         return None

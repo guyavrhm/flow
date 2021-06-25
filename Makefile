@@ -16,7 +16,8 @@ ifeq ($(UNAME_S),Linux)
 all: mod-lin aes-unix 
 mod-lin:
 	chmod +x src/hardware/clipboard/_xorg/xcopy.sh; \
-	chmod +x src/hardware/clipboard/_xorg/xpaste.sh
+	chmod +x src/hardware/clipboard/_xorg/xpaste.sh; \
+	chmod +x src/info/linres.bat;
 endif
 ifeq ($(UNAME_S),Darwin)
 all: mod-mac aes-unix
@@ -24,7 +25,8 @@ mod-mac:
 	chmod +x src/hardware/clipboard/_darwin/mcopy.sh; \
 	chmod +x src/hardware/clipboard/_darwin/mpaste.sh; \
 	chmod +x src/hardware/clipboard/_darwin/file2clip.applescript; \
-	chmod +x src/hardware/clipboard/_darwin/getfiles.applescript
+	chmod +x src/hardware/clipboard/_darwin/getfiles.applescript; \
+	chmod +x src/info/macres.applescript;
 endif
 
 aes-unix: src/network/aes/aes.c src/network/aes/gmult.c

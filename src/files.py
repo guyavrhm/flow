@@ -1,14 +1,14 @@
 """
 File location constants
 """
+import sys
 import os
 import tempfile
 
-import src.info.computerinfo as ci
 
 os.chdir(os.path.dirname(os.path.realpath(__file__)))
 
-if ci.platform == ci.WINDOWS:
+if sys.platform == 'win32':
     DATABASE = os.getenv('APPDATA') + '\\flow.db'
     AES_SO = 'network/aes/aes.dll'
 else:
@@ -32,3 +32,8 @@ XCOPY = './hardware/clipboard/_xorg/xcopy.sh'
 XPASTE = './hardware/clipboard/_xorg/xpaste.sh'
 MCOPY = './hardware/clipboard/_darwin/mcopy.sh'
 MPASTE = './hardware/clipboard/_darwin/mpaste.sh'
+
+# Information
+WINRES = 'info/winres.bat'
+LINRES = './info/linres.sh'
+MACRES = './info/macres.applescript'

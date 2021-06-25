@@ -1,1 +1,0 @@
-system_profiler SPDisplaysDataType | grep Resolution
