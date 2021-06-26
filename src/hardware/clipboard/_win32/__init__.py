@@ -14,7 +14,8 @@ class WindowsClipboard:
         """
         Sets given file paths to the clipboard.
         """
-        subprocess.Popen([FILE2CLIP_WIN] + files)
+        if len(files) != 0:
+            subprocess.Popen([FILE2CLIP_WIN] + files)
 
     @staticmethod
     def data():
