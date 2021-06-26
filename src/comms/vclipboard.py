@@ -63,7 +63,7 @@ class VirtualClipboard:
                             files.append({'type': 'file', 'name': dirpath + self.DIR_SLASH + f, 'data': contents})
 
             for f in files:
-                f['name'] = f['name'].replace(root_dir, '')
+                f['name'] = f['name'].replace(root_dir, '').replace('\\', '/')
 
             return files
 
