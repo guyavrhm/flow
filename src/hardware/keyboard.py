@@ -76,4 +76,4 @@ def key_from_str(key):
     if key.startswith("Key."):
         return kbuttons[key]
     else:
-        return key[1:-1]
+        return key[1:-1][0]
