@@ -23,5 +23,6 @@ class ScreenBlocker(QtWidgets.QWidget):
             Qt.ToolTip
         )
 
+        self.setWindowOpacity(0.3)
+        self.setGraphicsEffect(QtWidgets.QGraphicsOpacityEffect(self))
         self.setCursor(Qt.BlankCursor)
-        self.setWindowOpacity(0.05)
