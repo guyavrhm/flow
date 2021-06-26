@@ -22,8 +22,6 @@ class SettingsWindow(QMainWindow):
         self.setFixedSize(1013, 611)
         self.setWindowIcon(QtGui.QIcon(FLOW_PNG))
 
-        self.lip = get_ip()
-
         font = QtGui.QFont()
         font.setPixelSize(13)
 
@@ -59,7 +57,7 @@ class SettingsWindow(QMainWindow):
         self.label_local = QtWidgets.QLabel(self)
         self.label_local.setGeometry(QtCore.QRect(80, 100, 271, 16))
         self.label_local.setFont(font)
-        self.label_local.setText(f"{msgs.IP_INF} {self.lip}")
+        self.label_local.setText(f"{msgs.IP_INF} {get_ip()}")
         self.label_enterip = QtWidgets.QLabel(self)
         self.label_enterip.setGeometry(QtCore.QRect(80, 250, 111, 16))
         self.label_enterip.setFont(font)
@@ -219,11 +217,12 @@ class SettingsWindow(QMainWindow):
         if name not in Server.machines:
             self.deleteList.takeItem(self.deleteList.row(list_item))
             self.graphicsView.deleteScreen(name)
-
+    
     def updateView(self):
         """
-        Updates graphics view and delete list.
+        Updates the settings window.
         """
+        self.label_local.setText(f"{msgs.IP_INF} {get_ip()}")
         self.graphicsView.load()
         self.updateDeleteList()
 
