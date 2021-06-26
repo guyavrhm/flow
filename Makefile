@@ -17,7 +17,7 @@ all: mod-lin aes-unix
 mod-lin:
 	chmod +x src/hardware/clipboard/_xorg/xcopy.sh; \
 	chmod +x src/hardware/clipboard/_xorg/xpaste.sh; \
-	chmod +x src/info/linres.bat;
+	chmod +x src/info/linres.sh;
 endif
 ifeq ($(UNAME_S),Darwin)
 all: mod-mac aes-unix
