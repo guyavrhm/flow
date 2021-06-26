@@ -206,7 +206,7 @@ class SettingsWindow(QMainWindow):
         """
         self.deleteList.clear()
         for i, screen_name in enumerate(self.graphicsView.screens):
-            if screen_name != 'main':
+            if screen_name != Server.NAME:
                 self.deleteList.insertItem(i, screen_name)
 
     def deleteFromList(self, list_item):
