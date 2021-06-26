@@ -67,4 +67,7 @@ class Encryption:
             plain += self._key.dec_block(cipher[0:self.BLOCK_SIZE])
             cipher = cipher[self.BLOCK_SIZE:]
 
-        return plain[1:-plain[0]]
+        if plain[0] == 0:
+            return plain[1:]
+        else:
+            return plain[1:-plain[0]]
