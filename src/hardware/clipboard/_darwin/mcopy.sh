@@ -1,2 +1,2 @@
 #!/bin/sh
-printf $1 | pbcopy
+echo -n $1 | pbcopy
