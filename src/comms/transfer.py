@@ -114,7 +114,7 @@ class ControlledDevices:
 
             if cmd_type == "mov":
                 x_pos, y_pos = action
-                self.mouse.position = (int(x_pos), int(y_pos))
+                self.mouse.position = (int(float(x_pos)), int(float(y_pos)))
 
             elif cmd_type == "prsk":
                 # data = True/False, key:
