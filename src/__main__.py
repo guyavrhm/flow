@@ -42,11 +42,11 @@ class Main:
         Opens the flow web-page.
         """
         if computerinfo.platform == computerinfo.WINDOWS:
-            subprocess.Popen(['start', WEB_PAGE])
+            subprocess.Popen(f'start {WEB_PAGE}', shell=True)
         elif computerinfo.platform == computerinfo.MACOS:
-            subprocess.Popen(['open', WEB_PAGE])
+            subprocess.Popen(f'open {WEB_PAGE}', shell=True)
         else:
-            subprocess.Popen(['sensible-browser', WEB_PAGE])
+            subprocess.Popen(f'sensible-browser {WEB_PAGE}', shell=True)
 
     @staticmethod
     def open_settings():
