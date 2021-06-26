@@ -9,7 +9,7 @@ class LinuxClipboard:
     """
 
     @staticmethod
-    def set_files(files):
+    def set_files(files: list):
         """
         file sharing not supported on linux
         """
@@ -27,9 +27,8 @@ class LinuxClipboard:
         return out
 
     @staticmethod
-    def set_text(data):
+    def set_text(data: str):
         """
         Sets plain textf to the clipboard.
         """
-        data = data.replace('"', '\\"')
         subprocess.call([XCOPY, data])

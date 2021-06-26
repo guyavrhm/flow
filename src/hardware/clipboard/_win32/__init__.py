@@ -10,7 +10,7 @@ class WindowsClipboard:
     """
 
     @staticmethod
-    def set_files(files):
+    def set_files(files: list):
         """
         Sets given file paths to the clipboard.
         """
@@ -33,7 +33,7 @@ class WindowsClipboard:
         return data
 
     @staticmethod
-    def set_text(data):
+    def set_text(data: str):
         """
         Sets plain text to the clipboard.
         """
