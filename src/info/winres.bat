@@ -1,2 +1,2 @@
 @echo off
-wmic path Win32_VideoController get CurrentHorizontalResolution, CurrentVerticalResolution
+powershell -c "Get-CimInstance -ClassName Win32_VideoController | Select-Object CurrentHorizontalResolution, CurrentVerticalResolution"
