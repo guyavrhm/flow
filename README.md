@@ -38,7 +38,7 @@ flow sends data through the local network, fast and securly, for you to have an 
 #### Binary Release:
 
 *   #### Windows:
-    1. Download the [installer](https://github.com/guyavrhm/flow/releases/download/v1.0.3/flow.v1.0.3.setup.exe).
+    1. Download the [installer](https://github.com/guyavrhm/flow/releases/download/v1.0.4/flow.v1.0.4.setup.exe).
     2. Run the installer to install flow on your machine.
     3. A shortcut to flow will appear on your desktop.
 
