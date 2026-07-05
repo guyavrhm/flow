@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=flow
+Comment=Cross-platform virtual KVM software
+Exec=flow
+Icon=flow
+Terminal=false
+Categories=Utility;

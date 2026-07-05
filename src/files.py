@@ -12,7 +12,7 @@ if sys.platform == 'win32':
     DATABASE = os.path.join(os.getenv('APPDATA'), 'flow.db')
     AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.dll')
 else:
-    DATABASE = os.path.join(BASE_DIR, 'flow.db')
+    DATABASE = os.path.expanduser('~/.flow.db')
     AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.so')
 
 TEMP_FLOW = os.path.join(tempfile.gettempdir(), "flow")

@@ -6,3 +6,7 @@
 *.pyc
 *.db
 .vs
+build/
+dist/
+src/resources/flow.icns
+src/resources/flow.ico
