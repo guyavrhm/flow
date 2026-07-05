@@ -5,7 +5,6 @@ from PyQt5.QtCore import Qt, QPointF
 from PyQt5.QtGui import QPen, QColor
 from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsRectItem
 
-from .components import app
 
 from src.data.db import get_screens, update_screen, Screens
 from src.comms.server import Server
@@ -65,19 +64,19 @@ class MovingScreen(QGraphicsRectItem):
         """
         Sets mouse cursor to an open hand on hover.
         """
-        app.instance().setOverrideCursor(Qt.OpenHandCursor)
+        QtWidgets.QApplication.instance().setOverrideCursor(Qt.OpenHandCursor)
 
     def hoverLeaveEvent(self, event):
         """
         Sets mouse cursor to default on leaving hover.
         """
-        app.instance().setOverrideCursor(Qt.ArrowCursor)
+        QtWidgets.QApplication.instance().setOverrideCursor(Qt.ArrowCursor)
 
     def mousePressEvent(self, event):
         """
         Sets mouse cursor to closed hand on press.
         """
-        app.instance().setOverrideCursor(Qt.ClosedHandCursor)
+        QtWidgets.QApplication.instance().setOverrideCursor(Qt.ClosedHandCursor)
         self.setZValue(1)
 
     def mouseMoveEvent(self, event):
@@ -96,7 +95,7 @@ class MovingScreen(QGraphicsRectItem):
         """
         Snaps released screen and updates attachments.
         """
-        app.instance().setOverrideCursor(Qt.OpenHandCursor)
+        QtWidgets.QApplication.instance().setOverrideCursor(Qt.OpenHandCursor)
         self.snap()
         self.setZValue(0)
         self.view.updateAttachments()
@@ -254,7 +253,9 @@ class GraphicView(QGraphicsView):
             x = MAIN_X
             y = MAIN_Y
         else:
-            if name in Server.machines:
+            with Server.machines_lock:
+                is_connected = name in Server.machines
+            if is_connected:
                 color = MovingScreen.GREEN
             else:
                 color = MovingScreen.GREY
@@ -337,7 +338,6 @@ class GraphicView(QGraphicsView):
         """
         for s in self.screens.values():
             update_screen(s.attachments, s.name)
-            try:
-                Server.machines[s.name].attachments = s.attachments
-            except KeyError:
-                pass
+            with Server.machines_lock:
+                if s.name in Server.machines:
+                    Server.machines[s.name].attachments = s.attachments

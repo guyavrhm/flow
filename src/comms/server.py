@@ -1,4 +1,5 @@
 import time
+import threading
 
 from pynput.mouse import Controller
 
@@ -80,18 +81,20 @@ class Server(flowThread):
     NAME = 'main'
     # dictionary of running machines {name: Machine}
     machines = {}
+    machines_lock = threading.Lock()
 
     def __init__(self):
         super().__init__()
 
         # add the server to attachments
         attachments = get_attachments(self.NAME)
-        self.machines[self.NAME] = Machine(
-            get_screeninfo(),
-            attachments,
-            mpos=Controller().position,
-            address=(self.NAME,)
-        )
+        with self.machines_lock:
+            self.machines[self.NAME] = Machine(
+                get_screeninfo(),
+                attachments,
+                mpos=Controller().position,
+                address=(self.NAME,)
+            )
 
         # tcp and udp sockets
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -117,7 +120,8 @@ class Server(flowThread):
         """
         Starts accepting clients.
         """
-        self.current = self.machines[self.NAME]
+        with self.machines_lock:
+            self.current = self.machines[self.NAME]
 
         self.accept_clients_t.start()
         self.clipboard.start()
@@ -142,13 +146,14 @@ class Server(flowThread):
                 client.setblocking(False)
 
                 attachments = get_attachments(address[0])
-                self.machines[address[0]] = Machine(
-                    metrics,
-                    attachments,
-                    tcp_conn=client,
-                    udp_conn=self.udp_sock,
-                    address=address
-                )
+                with self.machines_lock:
+                    self.machines[address[0]] = Machine(
+                        metrics,
+                        attachments,
+                        tcp_conn=client,
+                        udp_conn=self.udp_sock,
+                        address=address
+                    )
                 self.machine_connected_signal.emit(address[0])
                 self.connect_signal.emit()
         except OSError:
@@ -160,15 +165,19 @@ class Server(flowThread):
         Remove client from current machines and emit disconnect signal to UI.
         """
         self.machine_disconnected_signal.emit(machine.address[0])
-        del self.machines[machine.address[0]]
+        with self.machines_lock:
+            if machine.address[0] in self.machines:
+                del self.machines[machine.address[0]]
+            num_machines = len(self.machines)
 
-        if len(self.machines) == 1:
+        if num_machines == 1:
             self.disconnect_signal.emit()
 
         if self.current == machine:
             self.devices.pause()
             self.hide_blocker_signal.emit()
-            self.current = self.machines[self.NAME]
+            with self.machines_lock:
+                self.current = self.machines[self.NAME]
 
     def runloop(self):
         """
@@ -176,11 +185,15 @@ class Server(flowThread):
         Switches current machine controlled when mouse touches edges of screen.
         """
         while self._running:
-            if self.current == self.machines[self.NAME]:
-                self.machines[self.NAME].mouse_position = Controller().position
+            with self.machines_lock:
+                is_main = (self.current == self.machines[self.NAME])
+                if is_main:
+                    self.machines[self.NAME].mouse_position = Controller().position
 
             try:
-                other = self.machines[self.current.at_edge()]
+                with self.machines_lock:
+                    edge = self.current.at_edge()
+                    other = self.machines[edge] if edge in self.machines else None
             except KeyError:
                 other = None
 
@@ -220,7 +233,9 @@ class Server(flowThread):
         self.clipboard.stop()
 
         # close all connections of machines
-        for c in self.machines.values():
+        with self.machines_lock:
+            machines_copy = list(self.machines.values())
+        for c in machines_copy:
             c.close()
 
         # close accepting clients thread

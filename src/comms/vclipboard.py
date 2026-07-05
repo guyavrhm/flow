@@ -196,7 +196,9 @@ class ServerClipboard(VirtualClipboard):
 
                 content = None
                 sent_from = None
-                for m in list(self.server.machines.values())[1:]:
+                with self.server.machines_lock:
+                    machines_list = list(self.server.machines.values())[1:]
+                for m in machines_list:
                     try:
                         content = m.tcp_conn.true_recv()
                         sent_from = m
@@ -210,7 +212,9 @@ class ServerClipboard(VirtualClipboard):
                 if content is not None:
                     self.to_clip(content)
 
-                    for m in list(self.server.machines.values())[1:]:
+                    with self.server.machines_lock:
+                        machines_list = list(self.server.machines.values())[1:]
+                    for m in machines_list:
                         if m != sent_from:
                             m.tcp_conn.true_send(content)
 
@@ -226,7 +230,9 @@ class ServerClipboard(VirtualClipboard):
             if not self._received:
                 formatted_content = self.format_data(clip_content)
 
-                for m in list(self.server.machines.values())[1:]:
+                with self.server.machines_lock:
+                    machines_list = list(self.server.machines.values())[1:]
+                for m in machines_list:
                     m.tcp_conn.true_send(formatted_content)
 
             self._received = False

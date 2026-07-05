@@ -83,7 +83,8 @@ class Main:
         if typ == Settings.CLIENT:
             self.serverclient = Client()
         else:
-            Server.machines.clear()
+            with Server.machines_lock:
+                Server.machines.clear()
             self.serverclient = Server()
             self.serverclient.machine_connected_signal.connect(settings.connect)
             self.serverclient.machine_disconnected_signal.connect(settings.disconnect)

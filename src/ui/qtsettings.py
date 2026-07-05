@@ -214,7 +214,9 @@ class SettingsWindow(QMainWindow):
         Deletes screen from delete list and graphics view.
         """
         name = list_item.text()
-        if name not in Server.machines:
+        with Server.machines_lock:
+            is_connected = name in Server.machines
+        if not is_connected:
             self.deleteList.takeItem(self.deleteList.row(list_item))
             self.graphicsView.deleteScreen(name)
     
