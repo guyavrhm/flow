@@ -57,6 +57,20 @@ def true_connect(sock, address):
         raise DifferentEncryption from None
 
 
+def recv_exactly(conn, n):
+    """
+    Receives exactly n bytes from connection.
+    Raises ConnectionError if connection closes prematurely.
+    """
+    data = b''
+    while len(data) < n:
+        packet = conn.recv(n - len(data))
+        if not packet:
+            raise ConnectionError("Socket closed prematurely")
+        data += packet
+    return data
+
+
 def true_send(conn, data):
     """
     Sends encrypted data to connection (TCP).
@@ -64,22 +78,15 @@ def true_send(conn, data):
     encrypted_data = key.encrypt(pickle.dumps(data))
     length = str(len(encrypted_data)).zfill(LENGTH).encode()
     data = length + encrypted_data
-    conn.send(data)
+    conn.sendall(data)
 
 
 def true_recv(conn):
     """
     Receives all encrypted data from connection (TCP).
     """
-    length = int(conn.recv(LENGTH))
-    data = b''
-
-    while length > BUFFER:
-        data_part = conn.recv(BUFFER)
-        data += data_part
-        length -= len(data_part)
-
-    data += conn.recv(length)
+    length = int(recv_exactly(conn, LENGTH))
+    data = recv_exactly(conn, length)
     return pickle.loads(key.decrypt(data))
 
 
