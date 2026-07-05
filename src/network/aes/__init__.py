@@ -17,6 +17,10 @@ class AES:
         aes_init = lib.aes_init
         aes_init.restype = ctypes.POINTER(ctypes.c_uint8)
 
+        # void aes_free(uint8_t *k);
+        self._aes_free = lib.aes_free
+        self._aes_free.restype = None
+
         # void aes_encrypt(uint8_t *data, uint8_t *k);
         self._aes_encrypt = lib.aes_encrypt
         self._aes_encrypt.restype = None
@@ -26,8 +30,16 @@ class AES:
         self._aes_decrypt.restype = None
 
         # self._k is a pointer to the expanded key
-        np_key = np.frombuffer(key, dtype=np.uint8)
+        # Convert read-only bytes to mutable bytearray to prevent SegFault when C mutates key buffer in-place
+        np_key = np.frombuffer(bytearray(key), dtype=np.uint8)
         self._k = aes_init(ctypes.c_void_p(np_key.ctypes.data))
+
+    def __del__(self):
+        """
+        Destructor to free expanded key memory allocated in C.
+        """
+        if hasattr(self, '_k') and self._k:
+            self._aes_free(self._k)
 
     def enc_block(self, data_16: bytes) -> bytes:
         """

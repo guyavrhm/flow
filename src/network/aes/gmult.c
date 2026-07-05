@@ -123,12 +123,13 @@ uint8_t gmt14[256] = {
 */
 uint8_t gmult(uint8_t n, uint8_t by) {
 switch (by) {
-    case 0x1:  return n;
-    case 0x2:  return gmt2[n];
-    case 0x3:  return gmt3[n];
-    case 0x9:  return gmt9[n];
-    case 0x11: return gmt11[n];
-    case 0x13: return gmt13[n];
-    case 0x14: return gmt14[n];
+    case 0x01: return n;
+    case 0x02: return gmt2[n];
+    case 0x03: return gmt3[n];
+    case 0x09: return gmt9[n];
+    case 0x0b: return gmt11[n];
+    case 0x0d: return gmt13[n];
+    case 0x0e: return gmt14[n];
+    default:   return 0;
     }
 }
