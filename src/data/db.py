@@ -3,6 +3,7 @@ Sqlite3 database used to store Settings options and machine locations.
 """
 import sqlite3
 import os
+import threading
 
 from src.files import DATABASE
 
@@ -49,19 +50,23 @@ DEFAULTS = {
 }
 
 
+db_lock = threading.Lock()
+
+
 def sql_exec(*args, **kwargs):
     """
     Excecutes sqlite command.
     """
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
+    with db_lock:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
 
-    c.execute(*args, **kwargs)
-    returned_data = c.fetchall()
+        c.execute(*args, **kwargs)
+        returned_data = c.fetchall()
 
-    conn.commit()
-    conn.close()
-    return returned_data
+        conn.commit()
+        conn.close()
+        return returned_data
 
 
 def create():
