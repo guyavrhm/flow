@@ -163,55 +163,6 @@ def build_macos_installer():
     if os.path.exists(temp_dmg):
         os.remove(temp_dmg)
         
-    # Generate background image using pure Python (prevents PyQt5 segfaults on macOS)
-    bg_path = os.path.join(DIST_DIR, 'background.png')
-    print("Generating background image...")
-    try:
-        import math
-        import struct
-        import zlib
-
-        def make_png(width, height, pixel_func):
-            png = b'\x89PNG\r\n\x1a\n'
-            def write_chunk(chunk_type, data):
-                nonlocal png
-                png += struct.pack('>I', len(data))
-                chunk = chunk_type + data
-                png += chunk
-                png += struct.pack('>I', zlib.crc32(chunk))
-            ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-            write_chunk(b'IHDR', ihdr)
-            raw_data = b''
-            for y in range(height):
-                scanline = b'\x00'
-                for x in range(width):
-                    r, g, b = pixel_func(x, y)
-                    scanline += struct.pack('BBB', r, g, b)
-                raw_data += scanline
-            write_chunk(b'IDAT', zlib.compress(raw_data))
-            write_chunk(b'IEND', b'')
-            return png
-
-        def get_pixel(x, y):
-            # 1. Arrow (Neon Blue: #3b82f6 -> 59, 130, 246)
-            if 207 <= y <= 213 and 240 <= x <= 370:
-                return 59, 130, 246
-            if 370 <= x <= 400:
-                h = 15.0 * (400.0 - x) / 30.0
-                if 210.0 - h <= y <= 210.0 + h:
-                    return 59, 130, 246
-
-            # 2. Solid White Background
-            return 255, 255, 255
-
-        png_data = make_png(640, 400, get_pixel)
-        with open(bg_path, 'wb') as f:
-            f.write(png_data)
-        print("Background image generated successfully.")
-    except Exception as e:
-        print(f"Could not generate custom background: {e}")
-        bg_path = None
-
     # Step 1: Create a temporary read-write DMG
     print("Creating temporary read-write DMG...")
     # Estimate size in MB (add 30MB overhead for safety)
@@ -252,45 +203,15 @@ def build_macos_installer():
         print("Creating Applications symlink...")
         os.symlink('/Applications', os.path.join(mount_path, 'Applications'))
         
-        # Copy background image
-        if bg_path and os.path.exists(bg_path):
-            bg_dir = os.path.join(mount_path, '.background')
-            os.makedirs(bg_dir, exist_ok=True)
-            shutil.copy(bg_path, os.path.join(bg_dir, 'background.png'))
-            
-        # Step 4: Run AppleScript to format Finder view
-        disk_name = os.path.basename(mount_path)
-        print(f"Configuring DMG layout via Finder for disk: {disk_name}...")
-        applescript = f'''
-        tell application "Finder"
-            tell disk "{disk_name}"
-                open
-                delay 2
-                set the_window to container window
-                set toolbar visible of the_window to false
-                set bounds of the_window to {{100, 100, 740, 500}}
-                set current view of the_window to icon view
-                set icon size of icon view options of the_window to 128
-                set background picture of icon view options of the_window to (POSIX file "{mount_path}/.background/background.png")
-                delay 1
-                set position of item "flow.app" to {{140, 210}}
-                set position of item "Applications" to {{500, 210}}
-                delay 2
-                close
-            end tell
-        end tell
-        '''
-        subprocess.run(["osascript", "-e", applescript], check=True)
-        
     except Exception as e:
-        print(f"Error while laying out DMG: {e}")
+        print(f"Error while copying files to DMG: {e}")
     finally:
-        # Step 5: Unmount DMG
+        # Step 4: Unmount DMG
         print("Unmounting DMG...")
         subprocess.run(["sync"])
         subprocess.run(["hdiutil", "detach", mount_path], check=True)
         
-    # Step 6: Convert to final compressed format
+    # Step 5: Convert to final compressed format
     print("Converting DMG to compressed production image...")
     convert_cmd = [
         "hdiutil", "convert",
@@ -305,8 +226,6 @@ def build_macos_installer():
     # Cleanup
     if os.path.exists(temp_dmg):
         os.remove(temp_dmg)
-    if bg_path and os.path.exists(bg_path):
-        os.remove(bg_path)
 
 
 def build_linux_installer():
