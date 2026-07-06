@@ -43,6 +43,7 @@ class Client(flowThread):
         Initiates UDP and TCP connection with the server.
         """
         self.disconnect_signal.emit()
+        self.connected = False
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.bind(('', 8118))
 

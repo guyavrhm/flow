@@ -126,7 +126,10 @@ class VirtualClipboard:
         self._on = False
         if self._clipboard_listener is not None:
             self._clipboard_listener.stop()
+            self._clipboard_listener = None
+        if self._receiving_t is not None:
             self._receiving_t.wait()
+            self._receiving_t = None
 
 
 class ClientClipboard(VirtualClipboard):
@@ -144,21 +147,16 @@ class ClientClipboard(VirtualClipboard):
         Receives clipboard contents from server.
         Sets clipboard to contents.
         """
-        try:
-            while self._on:
-
-                try:
-                    content = self.client.tcp_sock.true_recv()
-                except ValueError:
-                    # server closed content b''
-                    self.client.reconnect()
-                    continue
-
+        while self._on:
+            try:
+                content = self.client.tcp_sock.true_recv()
                 self.to_clip(content)
                 time.sleep(1)
-        except (ConnectionAbortedError, OSError):
-            # manualy disconnected
-            return
+            except (OSError, ConnectionError, ValueError):
+                if not self._on:
+                    break
+                self.client.reconnect()
+                continue
 
     def on_change(self, clip_content):
         """
@@ -191,36 +189,40 @@ class ServerClipboard(VirtualClipboard):
         Receives clipboard contents from server.
         Sets clipboard to contents and sends content to all clients.
         """
-        try:
-            while self._on:
+        while self._on:
+            content = None
+            sent_from = None
+            with self.server.machines_lock:
+                machines_list = list(self.server.machines.values())[1:]
+            for m in machines_list:
+                try:
+                    content = m.tcp_conn.true_recv()
+                    sent_from = m
+                except BlockingIOError:
+                    # No data to read
+                    pass
+                except (ConnectionError, OSError, ValueError):
+                    # Client disconnected / closed
+                    if not self._on:
+                        break
+                    self.server.remove_client(m)
 
-                content = None
-                sent_from = None
+            if not self._on:
+                break
+
+            if content is not None:
+                self.to_clip(content)
+
                 with self.server.machines_lock:
                     machines_list = list(self.server.machines.values())[1:]
                 for m in machines_list:
-                    try:
-                        content = m.tcp_conn.true_recv()
-                        sent_from = m
-                    except BlockingIOError:
-                        # No data to read
-                        pass
-                    except (ConnectionResetError, ValueError):
-                        # Client disconnected
-                        self.server.remove_client(m)
-
-                if content is not None:
-                    self.to_clip(content)
-
-                    with self.server.machines_lock:
-                        machines_list = list(self.server.machines.values())[1:]
-                    for m in machines_list:
-                        if m != sent_from:
+                    if m != sent_from:
+                        try:
                             m.tcp_conn.true_send(content)
+                        except OSError:
+                            pass
 
-                time.sleep(1)
-        except OSError:
-            return
+            time.sleep(1)
 
     def on_change(self, clip_content):
         """

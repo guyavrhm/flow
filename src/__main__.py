@@ -110,6 +110,7 @@ class Main:
             self.serverclient.stop()
             self.serverclient.wait()
             self.serverclient.deleteLater()
+            self.serverclient = None
 
     def exit_flow(self):
         self.stop_serverclient()

@@ -141,21 +141,33 @@ class Server(flowThread):
                 except DifferentEncryption:
                     continue
 
-                metrics = client.true_recv()
-                _, address = self.udp_sock.true_recvfrom(1024)
-                client.setblocking(False)
+                try:
+                    metrics = client.true_recv()
+                    _, address = self.udp_sock.true_recvfrom(1024)
+                    client.setblocking(False)
 
-                attachments = get_attachments(address[0])
-                with self.machines_lock:
-                    self.machines[address[0]] = Machine(
-                        metrics,
-                        attachments,
-                        tcp_conn=client,
-                        udp_conn=self.udp_sock,
-                        address=address
-                    )
-                self.machine_connected_signal.emit(address[0])
-                self.connect_signal.emit()
+                    attachments = get_attachments(address[0])
+                    with self.machines_lock:
+                        if address[0] in self.machines:
+                            try:
+                                self.machines[address[0]].close()
+                            except Exception:
+                                pass
+                        self.machines[address[0]] = Machine(
+                            metrics,
+                            attachments,
+                            tcp_conn=client,
+                            udp_conn=self.udp_sock,
+                            address=address
+                        )
+                    self.machine_connected_signal.emit(address[0])
+                    self.connect_signal.emit()
+                except (DifferentEncryption, OSError, ConnectionError, ValueError):
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    continue
         except OSError:
             # closed tcp_sock
             return
@@ -164,6 +176,10 @@ class Server(flowThread):
         """
         Remove client from current machines and emit disconnect signal to UI.
         """
+        try:
+            machine.close()
+        except Exception:
+            pass
         self.machine_disconnected_signal.emit(machine.address[0])
         with self.machines_lock:
             if machine.address[0] in self.machines:

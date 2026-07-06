@@ -70,6 +70,8 @@ class SharedDevices:
             for device in (self.mouse, self.lmouse, self.keyboard):
                 device.stop()
             self.lmouse.wait()
+            self.mouse.join()
+            self.keyboard.join()
 
     def stop(self):
         self.pause()
@@ -103,6 +105,8 @@ class ControlledDevices:
             try:
                 data = self.client.udp_sock.true_recvfrom(1024)[0]
             except OSError:  # when the udp socket is temporarly closed
+                if not self._on:
+                    break
                 time.sleep(1)
                 continue
 

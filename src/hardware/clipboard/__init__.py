@@ -58,6 +58,13 @@ class ClipboardListener(flowThread):
         self._callback = on_change
 
     def run(self):
+        # Clear any stale events in the queue before starting
+        while not clipboard_queue.empty():
+            try:
+                clipboard_queue.get_nowait()
+            except queue.Empty:
+                break
+
         recent_value = None
         while True:
             # Block indefinitely (no timeout, 0% CPU). Wakes up instantly on new value.
