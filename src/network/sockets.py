@@ -1,10 +1,10 @@
-"""
-Adds encryption and better functionality to socket.socket.
-"""
 import socket
 import pickle
+import logging
 
 from .encryption import Encryption
+
+logger = logging.getLogger(__name__)
 
 # maximum digits of data to send
 LENGTH = 10
@@ -20,6 +20,7 @@ class DifferentEncryption(Exception):
 
 
 def set_encryption_key(password: str):
+    logger.debug("Generating encryption key from password (%d chars)", len(password))
     return Encryption(password.encode())
 
 
@@ -31,11 +32,14 @@ def true_accept(sock):
     the same encryption password as this socket.
     """
     c, a = sock.accept()
+    logger.info("Accepted socket connection from: %s, handshaking encryption...", a)
     c.settimeout(5.0)
     try:
         c.true_recv()
         c.true_send('.')
-    except Exception:
+        logger.info("Encryption handshake succeeded for accepted connection %s", a)
+    except Exception as e:
+        logger.warning("Encryption handshake failed for accepted connection %s: %s", a, e)
         try:
             c.true_send('.')
         except Exception:
@@ -61,12 +65,15 @@ def true_connect(sock, address):
     :raises DifferentEncryption: if server doesn't have 
     the same encryption password as this socket.
     """
+    logger.info("Connecting socket to %s, handshaking encryption...", address)
     sock.settimeout(5.0)
     try:
         sock.connect(address)
         sock.true_send('.')
         sock.true_recv()
-    except Exception:
+        logger.info("Encryption handshake succeeded for outgoing connection to %s", address)
+    except Exception as e:
+        logger.warning("Encryption handshake failed for outgoing connection to %s: %s", address, e)
         raise DifferentEncryption from None
     finally:
         try:

@@ -1,12 +1,15 @@
 import os
 import time
 import shutil
+import logging
 
 import src.info.computerinfo as ci
 
 from src.files import TEMP_FLOW
 from src.hardware.clipboard import ClipboardListener, Clipboard
 from src.ui.qtthread import flowThread
+
+logger = logging.getLogger(__name__)
 
 
 class VirtualClipboard:
@@ -39,7 +42,7 @@ class VirtualClipboard:
         plain (str) -> plain (str)
         """
         if type(content) == tuple:
-
+            logger.info("Formatting %d clipboard files/folders for transmission", len(content))
             root_dir = self.DIR_SLASH.join(content[0].split(self.DIR_SLASH)[:-1]) + self.DIR_SLASH
             files = []
 
@@ -83,7 +86,7 @@ class VirtualClipboard:
         os.makedirs(TEMP_FLOW)
 
         if type(content) == list:
-
+            logger.info("Writing %d formatted files/folders from network to local clipboard", len(content))
             for d in content:
                 if d['type'] == 'folder':
                     os.makedirs(TEMP_FLOW + self.DIR_SLASH + d['name'])
@@ -95,6 +98,8 @@ class VirtualClipboard:
             Clipboard.set_files([TEMP_FLOW + self.DIR_SLASH + f for f in os.listdir(TEMP_FLOW)])
 
         else:
+            text_preview = content[:50] + "..." if len(content) > 50 else content
+            logger.info("Writing text data to local clipboard: '%s'", text_preview)
             self._received = True
             Clipboard.set_text(content)
 
@@ -116,6 +121,7 @@ class VirtualClipboard:
         """
         Starts the clipboard event listener and the receiving thread.
         """
+        logger.info("Starting virtual clipboard helper (listener and receiver)")
         self._on = True
         parent = getattr(self, 'client', getattr(self, 'server', None))
         self._clipboard_listener = ClipboardListener(on_change=self.on_change, parent=parent)
@@ -125,20 +131,21 @@ class VirtualClipboard:
             self._receiving_t.start()
 
     def stop(self):
+        logger.info("Stopping virtual clipboard helper")
         self._on = False
         if self._clipboard_listener is not None:
             try:
                 self._clipboard_listener.stop()
                 self._clipboard_listener.deleteLater()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to clean up clipboard listener: %s", e)
             self._clipboard_listener = None
         if self._receiving_t is not None:
             try:
                 self._receiving_t.wait()
                 self._receiving_t.deleteLater()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to clean up clipboard receiver thread: %s", e)
             self._receiving_t = None
 
 
@@ -157,16 +164,19 @@ class ClientClipboard(VirtualClipboard):
         Receives clipboard contents from server.
         Sets clipboard to contents.
         """
+        logger.info("Client clipboard receiver loop started")
         while self._on:
             try:
                 content = self.client.tcp_sock.true_recv()
                 if not self._on:
                     break
                 if content is not None:
+                    logger.info("Received clipboard update from server")
                     self.to_clip(content)
-            except Exception:
+            except Exception as e:
                 if not self._on:
                     break
+                logger.warning("Error receiving server clipboard update: %s. Initiating reconnect.", e)
                 self.client.reconnect()
                 continue
 
@@ -176,13 +186,14 @@ class ClientClipboard(VirtualClipboard):
         """
         try:
             if not self._received:
+                logger.info("Local clipboard changed; sending update to server")
                 formatted_content = self.format_data(clip_content)
                 self.client.tcp_sock.true_send(formatted_content)
 
             self._received = False
 
-        except Exception:
-            # when socket closes before initialized or other socket errors
+        except Exception as e:
+            logger.debug("Exception in client clipboard on_change: %s", e)
             pass
 
 
@@ -200,6 +211,8 @@ class ServerClipboard(VirtualClipboard):
         """
         Starts a dedicated clipboard receiver thread for the given client machine.
         """
+        client_name = machine.address[0] if machine.address else "Unknown"
+        logger.info("Starting clipboard receiver thread for client machine: %s", client_name)
         t = flowThread(target=lambda: self.receive_from_client(machine), parent=self.server)
         machine.clipboard_thread = t
         t.start()
@@ -208,26 +221,33 @@ class ServerClipboard(VirtualClipboard):
         """
         Dedicated blocking loop for receiving clipboard content from a specific client.
         """
+        client_name = machine.address[0] if machine.address else "Unknown"
+        logger.info("Started receiver loop for client %s clipboard", client_name)
         while self._on:
             try:
                 content = machine.tcp_conn.true_recv()
                 if not self._on:
                     break
                 if content is not None:
+                    logger.info("Received clipboard update from client %s", client_name)
                     self.to_clip(content)
                     
                     # Broadcast to all other machines
                     with self.server.machines_lock:
                         machines_list = list(self.server.machines.values())[1:]
+                    logger.info("Broadcasting clipboard update to %d other clients", len(machines_list) - 1)
                     for m in machines_list:
                         if m != machine:
                             try:
+                                logger.info("Sending broadcast clipboard update to client: %s", m.address[0] if m.address else "Unknown")
                                 m.tcp_conn.true_send(content)
-                            except OSError:
+                            except OSError as oe:
+                                logger.debug("Failed to send broadcast to %s: %s", m.address[0] if m.address else "Unknown", oe)
                                 pass
-            except Exception:
+            except Exception as e:
                 if not self._on:
                     break
+                logger.warning("Exception in clipboard receiver for client %s: %s. Removing client.", client_name, e)
                 self.server.remove_client(machine)
                 break
 
@@ -237,16 +257,22 @@ class ServerClipboard(VirtualClipboard):
         """
         try:
             if not self._received:
+                logger.info("Server local clipboard changed; broadcasting to all clients")
                 formatted_content = self.format_data(clip_content)
 
                 with self.server.machines_lock:
                     machines_list = list(self.server.machines.values())[1:]
+                logger.info("Broadcasting updated clipboard to %d clients", len(machines_list))
                 for m in machines_list:
                     try:
+                        logger.info("Broadcasting clipboard update to client: %s", m.address[0] if m.address else "Unknown")
                         m.tcp_conn.true_send(formatted_content)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Failed to broadcast clipboard update to %s: %s", m.address[0] if m.address else "Unknown", e)
                         pass
 
             self._received = False
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in server clipboard on_change: %s", e)
             pass
+

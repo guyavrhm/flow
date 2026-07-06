@@ -1,6 +1,12 @@
 import sys
 import subprocess
 
+import src.logger
+src.logger.setup_logging()
+
+import logging
+logger = logging.getLogger(__name__)
+
 import src.info.computerinfo as computerinfo
 import src.network.sockets as socket
 
@@ -20,6 +26,7 @@ class Main:
     """
 
     def __init__(self):
+        logger.info("Initializing flow application...")
 
         settings.onSave(self.save)
 
@@ -32,6 +39,7 @@ class Main:
         self.serverclient = None
 
         typ = get_data(Settings.PC)
+        logger.info("Application starting in %s mode", "SERVER" if typ == Settings.SERVER else "CLIENT")
         self.init_serverclient(typ)
 
         sys.exit(app.exec_())
@@ -41,6 +49,7 @@ class Main:
         """
         Opens the flow web-page.
         """
+        logger.info("Opening help webpage: %s", WEB_PAGE)
         if computerinfo.platform == computerinfo.WINDOWS:
             subprocess.Popen(f'start {WEB_PAGE}', shell=True)
         elif computerinfo.platform == computerinfo.MACOS:
@@ -50,6 +59,7 @@ class Main:
 
     @staticmethod
     def open_settings():
+        logger.info("Opening settings UI")
         settings.show()
 
     def save(self):
@@ -58,7 +68,7 @@ class Main:
         Will re-initialize server/client if encryption or
         or server/client specification has changed.
         """
-
+        logger.info("Saving settings change from UI...")
         settings_before = get_all_data()
 
         settings.update()
@@ -71,14 +81,18 @@ class Main:
                 settings_before[Settings.PASS] != settings_after[Settings.PASS] or
                 settings_before[Settings.IP] != settings_after[Settings.IP]
         ):
+            logger.info("Settings changed (type, encryption, password, or IP). Re-initializing server/client.")
             self.stop_serverclient()
             self.init_serverclient(settings_after[Settings.PC])
+        else:
+            logger.info("Settings updated, but changes did not require connection re-initialization.")
 
     def init_serverclient(self, typ):
         """
         Initializes and starts server or client thread
         based on 'typ' argument.
         """
+        logger.info("Initializing %s helper", "SERVER" if typ == Settings.SERVER else "CLIENT")
         self.serverclient = None
 
         if typ == Settings.CLIENT:
@@ -96,24 +110,30 @@ class Main:
         self.serverclient.disconnect_signal.connect(tray_icon.setDisconnected)
 
         if get_data(Settings.ENCRYPTION) == Settings.ENCRYPTION_ON:
+            logger.info("Encryption is enabled; setting key from password")
             socket.key = socket.set_encryption_key(get_data(Settings.PASS))
         else:
+            logger.info("Encryption is disabled; setting empty encryption key")
             socket.key = socket.set_encryption_key("")
 
+        logger.info("Starting connection helper thread")
         self.serverclient.start()
 
     def stop_serverclient(self):
         """
         Stops the server or client thread from running.
         """
+        logger.info("Stopping connection helper thread...")
         tray_icon.setIcon(tray_icon.ICON_DISCONNECTED)
         if self.serverclient is not None:
             self.serverclient.stop()
             self.serverclient.wait()
             self.serverclient.deleteLater()
             self.serverclient = None
+            logger.info("Connection helper thread successfully stopped and cleaned up")
 
     def exit_flow(self):
+        logger.info("Exiting flow application gracefully")
         self.stop_serverclient()
         tray_icon.hide()
         app.quit()
@@ -121,3 +141,6 @@ class Main:
 
 if computerinfo.supported():
     Main()
+else:
+    print("Error: Platform not supported", file=sys.stderr)
+

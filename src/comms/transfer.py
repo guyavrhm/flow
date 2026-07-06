@@ -1,7 +1,10 @@
 import time
+import logging
 
 from src.hardware.keyboard import KeyboardController, KeyboardListener, key_from_str
 from src.hardware.mouse import LockedMouse, MouseController, MouseListener, mbuttons
+
+logger = logging.getLogger(__name__)
 
 
 class SharedDevices:
@@ -57,6 +60,7 @@ class SharedDevices:
         """
         Starts mouse and keyboard event capture
         """
+        logger.info("Starting input device capture (mouse and keyboard sharing)")
         self.lmouse = LockedMouse(on_move=self.__on_move)
         self.mouse = MouseListener(on_click=self.__on_mouse_click, on_scroll=self.__on_mouse_scroll)
         self.keyboard = KeyboardListener(on_press=self.__on_keyboard_press, on_release=self.__on_keyboard_release,
@@ -66,6 +70,7 @@ class SharedDevices:
         self.keyboard.start()
 
     def pause(self):
+        logger.info("Pausing/stopping input device capture")
         if self.mouse is not None:
             for device in (self.mouse, self.lmouse, self.keyboard):
                 device.stop()
@@ -74,11 +79,12 @@ class SharedDevices:
             self.keyboard.join()
 
     def stop(self):
+        logger.info("Stopping shared devices helper and sending stop event to client")
         self.pause()
         try:
             self.socket.true_sendto("stp X X", self.machine.address)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to send stop command to client: %s", e)
 
 
 class ControlledDevices:
@@ -103,6 +109,7 @@ class ControlledDevices:
         """
         Implements events received from server
         """
+        logger.info("Starting hardware control loop")
         while self._on:
             try:
                 data = self.client.udp_sock.true_recvfrom(1024)[0]
@@ -111,6 +118,8 @@ class ControlledDevices:
 
                 cmd_type = data[0]
                 action = (data[1], data[2])
+
+                logger.debug("Processing command: %s with action: %s", cmd_type, action)
 
                 if cmd_type == "mov":
                     x_pos, y_pos = action
@@ -125,6 +134,7 @@ class ControlledDevices:
                         else:
                             self.keyboard.release(key_from_str(key))
                     except KeyError:
+                        logger.warning("Unmapped key requested by server: %s", key)
                         pass
 
                 elif cmd_type == "prsm":
@@ -142,12 +152,16 @@ class ControlledDevices:
 
                 elif cmd_type == "stp":
                     # data = 'X', 'X'
+                    logger.info("Received stop notification from server")
                     pass
-            except Exception:  # when the udp socket is closed/reconnecting or packet decryption/unpickling fails
+            except Exception as e:  # when the udp socket is closed/reconnecting or packet decryption/unpickling fails
                 if not self._on:
                     break
+                logger.debug("Exception in get_controlled loop: %s", e)
                 time.sleep(1)
                 continue
 
     def stop(self):
+        logger.info("Stopping hardware control loop")
         self._on = False
+

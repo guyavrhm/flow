@@ -10,9 +10,11 @@ BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
 if sys.platform == 'win32':
     DATABASE = os.path.join(os.getenv('APPDATA'), 'flow.db')
+    LOG_FILE = os.path.join(os.getenv('APPDATA'), 'flow.log')
     AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.dll')
 else:
     DATABASE = os.path.expanduser('~/.flow.db')
+    LOG_FILE = os.path.expanduser('~/.flow.log')
     AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.so')
 
 TEMP_FLOW = os.path.join(tempfile.gettempdir(), "flow")
