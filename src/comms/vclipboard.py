@@ -117,18 +117,28 @@ class VirtualClipboard:
         Starts the clipboard event listener and the receiving thread.
         """
         self._on = True
-        self._clipboard_listener = ClipboardListener(on_change=self.on_change)
+        parent = getattr(self, 'client', getattr(self, 'server', None))
+        self._clipboard_listener = ClipboardListener(on_change=self.on_change, parent=parent)
         self._clipboard_listener.start()
-        self._receiving_t = flowThread(target=self.receive)
-        self._receiving_t.start()
+        if self.__class__.__name__ != 'ServerClipboard':
+            self._receiving_t = flowThread(target=self.receive, parent=parent)
+            self._receiving_t.start()
 
     def stop(self):
         self._on = False
         if self._clipboard_listener is not None:
-            self._clipboard_listener.stop()
+            try:
+                self._clipboard_listener.stop()
+                self._clipboard_listener.deleteLater()
+            except Exception:
+                pass
             self._clipboard_listener = None
         if self._receiving_t is not None:
-            self._receiving_t.wait()
+            try:
+                self._receiving_t.wait()
+                self._receiving_t.deleteLater()
+            except Exception:
+                pass
             self._receiving_t = None
 
 
@@ -150,9 +160,11 @@ class ClientClipboard(VirtualClipboard):
         while self._on:
             try:
                 content = self.client.tcp_sock.true_recv()
-                self.to_clip(content)
-                time.sleep(1)
-            except (OSError, ConnectionError, ValueError):
+                if not self._on:
+                    break
+                if content is not None:
+                    self.to_clip(content)
+            except Exception:
                 if not self._on:
                     break
                 self.client.reconnect()
@@ -169,8 +181,8 @@ class ClientClipboard(VirtualClipboard):
 
             self._received = False
 
-        except OSError:
-            # when socket closes before initialized
+        except Exception:
+            # when socket closes before initialized or other socket errors
             pass
 
 
@@ -184,49 +196,44 @@ class ServerClipboard(VirtualClipboard):
         # server class
         self.server = server
 
-    def receive(self):
+    def start_client_receiver(self, machine):
         """
-        Receives clipboard contents from server.
-        Sets clipboard to contents and sends content to all clients.
+        Starts a dedicated clipboard receiver thread for the given client machine.
+        """
+        t = flowThread(target=lambda: self.receive_from_client(machine), parent=self.server)
+        machine.clipboard_thread = t
+        t.start()
+
+    def receive_from_client(self, machine):
+        """
+        Dedicated blocking loop for receiving clipboard content from a specific client.
         """
         while self._on:
-            content = None
-            sent_from = None
-            with self.server.machines_lock:
-                machines_list = list(self.server.machines.values())[1:]
-            for m in machines_list:
-                try:
-                    content = m.tcp_conn.true_recv()
-                    sent_from = m
-                except BlockingIOError:
-                    # No data to read
-                    pass
-                except (ConnectionError, OSError, ValueError):
-                    # Client disconnected / closed
-                    if not self._on:
-                        break
-                    self.server.remove_client(m)
-
-            if not self._on:
+            try:
+                content = machine.tcp_conn.true_recv()
+                if not self._on:
+                    break
+                if content is not None:
+                    self.to_clip(content)
+                    
+                    # Broadcast to all other machines
+                    with self.server.machines_lock:
+                        machines_list = list(self.server.machines.values())[1:]
+                    for m in machines_list:
+                        if m != machine:
+                            try:
+                                m.tcp_conn.true_send(content)
+                            except OSError:
+                                pass
+            except Exception:
+                if not self._on:
+                    break
+                self.server.remove_client(machine)
                 break
-
-            if content is not None:
-                self.to_clip(content)
-
-                with self.server.machines_lock:
-                    machines_list = list(self.server.machines.values())[1:]
-                for m in machines_list:
-                    if m != sent_from:
-                        try:
-                            m.tcp_conn.true_send(content)
-                        except OSError:
-                            pass
-
-            time.sleep(1)
 
     def on_change(self, clip_content):
         """
-        Sends clipboard content to all connected clients on clibpoard change.
+        Sends clipboard content to all connected clients on clipboard change.
         """
         try:
             if not self._received:
@@ -235,8 +242,11 @@ class ServerClipboard(VirtualClipboard):
                 with self.server.machines_lock:
                     machines_list = list(self.server.machines.values())[1:]
                 for m in machines_list:
-                    m.tcp_conn.true_send(formatted_content)
+                    try:
+                        m.tcp_conn.true_send(formatted_content)
+                    except Exception:
+                        pass
 
             self._received = False
-        except OSError:
+        except Exception:
             pass

@@ -4,6 +4,7 @@ from src.ui.qtthread import flowThread
 
 # Thread-safe queue to pass clipboard data from the main GUI thread to the listener background thread
 clipboard_queue = queue.Queue()
+clipboard_queue_active = False
 
 class ClipboardHelper(QObject):
     """
@@ -53,11 +54,14 @@ class ClipboardListener(flowThread):
     Thread that processes clipboard change events.
     Blocks indefinitely waiting for events from the main thread (0% CPU).
     """
-    def __init__(self, on_change, pause=1):
-        super().__init__()
+    def __init__(self, on_change, parent=None, pause=1):
+        super().__init__(parent=parent)
         self._callback = on_change
 
     def run(self):
+        global clipboard_queue_active
+        clipboard_queue_active = True
+
         # Clear any stale events in the queue before starting
         while not clipboard_queue.empty():
             try:
@@ -77,6 +81,8 @@ class ClipboardListener(flowThread):
                 self._callback(recent_value)
 
     def stop(self):
+        global clipboard_queue_active
+        clipboard_queue_active = False
         # Push sentinel to wake up the thread and exit cleanly
         clipboard_queue.put(None)
         self.wait()
@@ -87,6 +93,9 @@ def handle_clipboard_changed():
     Slot triggered on the main thread when QClipboard contents change.
     Reads current clipboard contents and queues it for the background thread.
     """
+    if not clipboard_queue_active:
+        return
+
     from PyQt5.QtWidgets import QApplication
     clipboard = QApplication.clipboard()
     mime_data = clipboard.mimeData()

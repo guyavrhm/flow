@@ -28,13 +28,15 @@ class Client(flowThread):
         self.devices = ControlledDevices(self)
         self.clipboard = ClientClipboard(self)
 
+        self._running = True
+
     def run(self):
         """
         Connectes to a server and starts listening for hardware events.
         """
         self.init_connection()
 
-        if self.connected:
+        if self.connected and self._running:
             self.clipboard.start()
             self.devices.get_controlled()  # blocking
 
@@ -42,13 +44,15 @@ class Client(flowThread):
         """
         Initiates UDP and TCP connection with the server.
         """
+        if not self._running:
+            return
         self.disconnect_signal.emit()
         self.connected = False
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.bind(('', 8118))
+        self.udp_sock.bind(('', 0))
 
         self.waiting_for_connection = True
-        while self.waiting_for_connection:
+        while self.waiting_for_connection and self._running:
             try:
                 server_ip = get_data(Settings.IP)
                 self.tcp_sock = socket.socket()
@@ -59,10 +63,15 @@ class Client(flowThread):
                 # OSError: no route to host -> host not up
                 # TimeError, ConnectionRefused error: host not connected to flow
                 # socket.gaierror: invalid ip address
+                if self.tcp_sock is not None:
+                    try:
+                        self.tcp_sock.close()
+                    except Exception:
+                        pass
                 time.sleep(1)
                 continue
 
-        if self.connected:
+        if self.connected and self._running:
             try:
                 self.tcp_sock.true_send(get_screeninfo())
                 self.udp_sock.true_sendto('.', (server_ip, 8118))
@@ -76,18 +85,35 @@ class Client(flowThread):
         """
         Reconnects to a server.
         """
+        if not self._running:
+            return
         self.tcp_sock.close()
         self.udp_sock.close()
         self.init_connection()
 
     def stop(self):
+        self._running = False
         self.connected = False
         self.waiting_for_connection = False
-        self.udp_sock.close()
-        self.tcp_sock.close()
+        self.clipboard._on = False
+        self.devices._on = False
+
+        if self.udp_sock is not None:
+            try:
+                self.udp_sock.close()
+            except Exception:
+                pass
+        if self.tcp_sock is not None:
+            try:
+                self.tcp_sock.close()
+            except Exception:
+                pass
         try:
             self.clipboard.stop()
-            self.devices.stop()
-        except AttributeError:
-            # not initialized
+        except Exception:
             pass
+        try:
+            self.devices.stop()
+        except Exception:
+            pass
+

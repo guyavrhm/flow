@@ -75,7 +75,10 @@ class SharedDevices:
 
     def stop(self):
         self.pause()
-        self.socket.true_sendto("stp X X", self.machine.address)
+        try:
+            self.socket.true_sendto("stp X X", self.machine.address)
+        except Exception:
+            pass
 
 
 class ControlledDevices:
@@ -101,52 +104,50 @@ class ControlledDevices:
         Implements events received from server
         """
         while self._on:
-
             try:
                 data = self.client.udp_sock.true_recvfrom(1024)[0]
-            except OSError:  # when the udp socket is temporarly closed
+                if type(data) == str:
+                    data = data.split(" ")
+
+                cmd_type = data[0]
+                action = (data[1], data[2])
+
+                if cmd_type == "mov":
+                    x_pos, y_pos = action
+                    self.mouse.position = (int(float(x_pos)), int(float(y_pos)))
+
+                elif cmd_type == "prsk":
+                    # data = True/False, key:
+                    pressed, key = action
+                    try:
+                        if pressed:
+                            self.keyboard.press(key_from_str(key))
+                        else:
+                            self.keyboard.release(key_from_str(key))
+                    except KeyError:
+                        pass
+
+                elif cmd_type == "prsm":
+                    # data = True/False, button:
+                    pressed, str_button = action
+                    if pressed:
+                        self.mouse.press(mbuttons[str_button])
+                    else:
+                        self.mouse.release(mbuttons[str_button])
+
+                elif cmd_type == "scrl":
+                    # data = dx, dy
+                    dx, dy = action
+                    self.mouse.scroll(int(dx), int(dy))
+
+                elif cmd_type == "stp":
+                    # data = 'X', 'X'
+                    pass
+            except Exception:  # when the udp socket is closed/reconnecting or packet decryption/unpickling fails
                 if not self._on:
                     break
                 time.sleep(1)
                 continue
-
-            if type(data) == str:
-                data = data.split(" ")
-
-            cmd_type = data[0]
-            action = (data[1], data[2])
-
-            if cmd_type == "mov":
-                x_pos, y_pos = action
-                self.mouse.position = (int(float(x_pos)), int(float(y_pos)))
-
-            elif cmd_type == "prsk":
-                # data = True/False, key:
-                pressed, key = action
-                try:
-                    if pressed:
-                        self.keyboard.press(key_from_str(key))
-                    else:
-                        self.keyboard.release(key_from_str(key))
-                except KeyError:
-                    pass
-
-            elif cmd_type == "prsm":
-                # data = True/False, button:
-                pressed, str_button = action
-                if pressed:
-                    self.mouse.press(mbuttons[str_button])
-                else:
-                    self.mouse.release(mbuttons[str_button])
-
-            elif cmd_type == "scrl":
-                # data = dx, dy
-                dx, dy = action
-                self.mouse.scroll(int(dx), int(dy))
-
-            elif cmd_type == "stp":
-                # data = 'X', 'X'
-                pass
 
     def stop(self):
         self._on = False

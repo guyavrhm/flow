@@ -31,12 +31,25 @@ def true_accept(sock):
     the same encryption password as this socket.
     """
     c, a = sock.accept()
+    c.settimeout(5.0)
     try:
         c.true_recv()
         c.true_send('.')
-    except (EOFError, ValueError, pickle.UnpicklingError):
-        c.true_send('.')
+    except Exception:
+        try:
+            c.true_send('.')
+        except Exception:
+            pass
+        try:
+            c.close()
+        except Exception:
+            pass
         raise DifferentEncryption from None
+    finally:
+        try:
+            c.settimeout(None)
+        except Exception:
+            pass
 
     return c, a
 
@@ -48,13 +61,19 @@ def true_connect(sock, address):
     :raises DifferentEncryption: if server doesn't have 
     the same encryption password as this socket.
     """
-    sock.connect(address)
-
-    sock.true_send('.')
+    sock.settimeout(5.0)
     try:
+        sock.connect(address)
+        sock.true_send('.')
         sock.true_recv()
-    except (EOFError, ValueError, pickle.UnpicklingError):
+    except Exception:
         raise DifferentEncryption from None
+    finally:
+        try:
+            sock.settimeout(None)
+        except Exception:
+            pass
+
 
 
 def recv_exactly(conn, n):

@@ -68,7 +68,8 @@ class Main:
         if (
                 settings_before[Settings.PC] != settings_after[Settings.PC] or
                 settings_before[Settings.ENCRYPTION] != settings_after[Settings.ENCRYPTION] or
-                settings_before[Settings.PASS] != settings_after[Settings.PASS]
+                settings_before[Settings.PASS] != settings_after[Settings.PASS] or
+                settings_before[Settings.IP] != settings_after[Settings.IP]
         ):
             self.stop_serverclient()
             self.init_serverclient(settings_after[Settings.PC])

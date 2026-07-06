@@ -24,6 +24,7 @@ class Machine:
         self.tcp_conn = tcp_conn
         self.udp_conn = udp_conn
         self.address = address
+        self.clipboard_thread = None
 
     def at_edge(self):
         """
@@ -64,12 +65,24 @@ class Machine:
             Controller().position = machine.mouse_position
 
     def close(self):
-        for conn in (self.tcp_conn, self.udp_conn):
-            if conn is not None:
-                conn.close()
+        if self.tcp_conn is not None:
+            try:
+                self.tcp_conn.close()
+            except Exception:
+                pass
+        if self.clipboard_thread is not None:
+            try:
+                from PyQt5.QtCore import QThread
+                if QThread.currentThread() != self.clipboard_thread:
+                    self.clipboard_thread.wait()
+                self.clipboard_thread.deleteLater()
+            except Exception:
+                pass
+            self.clipboard_thread = None
 
     def is_server(self):
         return self.tcp_conn is None
+
 
 
 class Server(flowThread):
@@ -98,16 +111,18 @@ class Server(flowThread):
 
         # tcp and udp sockets
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.udp_sock.bind(('', 8118))
 
         self.tcp_sock = socket.socket()
+        self.tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.tcp_sock.bind(('', 8118))
 
         # weather the server is running
         self._running = False
 
         # accepting clients thread
-        self.accept_clients_t = flowThread(target=self.accept_clients)
+        self.accept_clients_t = flowThread(target=self.accept_clients, parent=self)
 
         # current machine being controlled
         self.current = None
@@ -143,26 +158,54 @@ class Server(flowThread):
 
                 try:
                     metrics = client.true_recv()
-                    _, address = self.udp_sock.true_recvfrom(1024)
-                    client.setblocking(False)
+                    
+                    client_ip = client.getpeername()[0]
+                    self.udp_sock.settimeout(3.0)
+                    address = None
+                    start_time = time.time()
+                    while time.time() - start_time < 3.0 and self._running:
+                        try:
+                            _, addr = self.udp_sock.true_recvfrom(1024)
+                            if addr[0] == client_ip:
+                                address = addr
+                                break
+                        except socket.timeout:
+                            break
+                        except Exception:
+                            if not self._running:
+                                break
+                            continue
+                    self.udp_sock.settimeout(None)
+
+                    if address is None:
+                        raise ConnectionError("UDP handshake timed out or failed")
 
                     attachments = get_attachments(address[0])
+                    old_machine = None
                     with self.machines_lock:
                         if address[0] in self.machines:
-                            try:
-                                self.machines[address[0]].close()
-                            except Exception:
-                                pass
-                        self.machines[address[0]] = Machine(
+                            old_machine = self.machines.pop(address[0])
+                        machine = Machine(
                             metrics,
                             attachments,
                             tcp_conn=client,
                             udp_conn=self.udp_sock,
                             address=address
                         )
+                        self.machines[address[0]] = machine
+
+                    if old_machine is not None:
+                        try:
+                            old_machine.close()
+                        except Exception:
+                            pass
+
+                    # Start clipboard receiver thread for this client
+                    self.clipboard.start_client_receiver(machine)
+
                     self.machine_connected_signal.emit(address[0])
                     self.connect_signal.emit()
-                except (DifferentEncryption, OSError, ConnectionError, ValueError):
+                except Exception:
                     try:
                         client.close()
                     except Exception:
@@ -176,21 +219,29 @@ class Server(flowThread):
         """
         Remove client from current machines and emit disconnect signal to UI.
         """
+        with self.machines_lock:
+            is_active = self.machines.get(machine.address[0]) is machine
+            if is_active:
+                del self.machines[machine.address[0]]
+            num_machines = len(self.machines)
+
+        if not is_active:
+            return
+
         try:
             machine.close()
         except Exception:
             pass
+
         self.machine_disconnected_signal.emit(machine.address[0])
-        with self.machines_lock:
-            if machine.address[0] in self.machines:
-                del self.machines[machine.address[0]]
-            num_machines = len(self.machines)
 
         if num_machines == 1:
             self.disconnect_signal.emit()
 
         if self.current == machine:
-            self.devices.pause()
+            if self.devices is not None:
+                self.devices.pause()
+                self.devices = None
             self.hide_blocker_signal.emit()
             with self.machines_lock:
                 self.current = self.machines[self.NAME]
@@ -240,11 +291,11 @@ class Server(flowThread):
         self._running = False
 
         # stop shared devices thread
-        try:
-            self.devices.stop()
-        except AttributeError:
-            # devices not initialized
-            pass
+        if self.devices is not None:
+            try:
+                self.devices.stop()
+            except Exception:
+                pass
 
         self.clipboard.stop()
 
@@ -255,6 +306,17 @@ class Server(flowThread):
             c.close()
 
         # close accepting clients thread
-        self.udp_sock.close()
-        self.tcp_sock.close()
-        self.accept_clients_t.wait()
+        try:
+            self.udp_sock.close()
+        except Exception:
+            pass
+        try:
+            self.tcp_sock.close()
+        except Exception:
+            pass
+        try:
+            self.accept_clients_t.wait()
+            self.accept_clients_t.deleteLater()
+        except Exception:
+            pass
+
