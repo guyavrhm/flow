@@ -1,12 +1,27 @@
-/__pycache__
-/.idea
+# Compiled files
 *.dll
 *.exe
 *.so
 *.pyc
 *.db
-.vs
-build/
-dist/
-src/resources/flow.icns
-src/resources/flow.ico
+
+# Build and IDE directories
+/__pycache__/
+/.idea/
+/.vs/
+/build/
+/dist/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+/venv/
+/.venv/
+/env/
+/.env/
+
+# Resource cache
+/src/resources/flow.icns
+/src/resources/flow.ico
