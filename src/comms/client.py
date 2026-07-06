@@ -61,23 +61,45 @@ class Client(flowThread):
         self.udp_sock.bind(('', 0))
 
         self.waiting_for_connection = True
+        
+        retry_delay = 5
+        last_logged_ip = None
+        has_logged_failure = False
+
         while self.waiting_for_connection and self._running:
             try:
                 server_ip = get_data(Settings.IP)
-                logger.info("Attempting TCP connection to server IP: %s", server_ip)
+                if not server_ip or server_ip.strip() == "":
+                    if last_logged_ip != server_ip:
+                        logger.warning("Server IP is not configured in Settings. Please configure the IP address.")
+                        last_logged_ip = server_ip
+                    time.sleep(2)
+                    continue
+
+                if last_logged_ip != server_ip:
+                    logger.info("Attempting TCP connection to server IP: %s", server_ip)
+                    last_logged_ip = server_ip
+                    has_logged_failure = False
+
                 self.tcp_sock = socket.socket()
                 self.tcp_sock.true_connect((server_ip, 8118))
                 self.waiting_for_connection = False
                 self.connected = True
                 logger.info("TCP connection to server succeeded")
             except (OSError, TimeoutError, ConnectionRefusedError, socket.gaierror, DifferentEncryption) as e:
-                logger.warning("TCP connection failed: %s. Retrying in 1s...", e)
+                if not has_logged_failure:
+                    logger.warning("TCP connection failed: %s. Retrying in background...", e)
+                    has_logged_failure = True
+                else:
+                    logger.debug("TCP connection failed: %s. Retrying in 5s...", e)
+
                 if self.tcp_sock is not None:
                     try:
                         self.tcp_sock.close()
                     except Exception as ex:
                         logger.debug("Failed to close TCP socket during connection retry: %s", ex)
-                time.sleep(1)
+                
+                time.sleep(retry_delay)
                 continue
 
         if self.connected and self._running:

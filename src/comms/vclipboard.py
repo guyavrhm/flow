@@ -123,11 +123,10 @@ class VirtualClipboard:
         """
         logger.info("Starting virtual clipboard helper (listener and receiver)")
         self._on = True
-        parent = getattr(self, 'client', getattr(self, 'server', None))
-        self._clipboard_listener = ClipboardListener(on_change=self.on_change, parent=parent)
+        self._clipboard_listener = ClipboardListener(on_change=self.on_change, parent=None)
         self._clipboard_listener.start()
         if self.__class__.__name__ != 'ServerClipboard':
-            self._receiving_t = flowThread(target=self.receive, parent=parent)
+            self._receiving_t = flowThread(target=self.receive, parent=None)
             self._receiving_t.start()
 
     def stop(self):
@@ -213,7 +212,7 @@ class ServerClipboard(VirtualClipboard):
         """
         client_name = machine.address[0] if machine.address else "Unknown"
         logger.info("Starting clipboard receiver thread for client machine: %s", client_name)
-        t = flowThread(target=lambda: self.receive_from_client(machine), parent=self.server)
+        t = flowThread(target=lambda: self.receive_from_client(machine), parent=None)
         machine.clipboard_thread = t
         t.start()
 

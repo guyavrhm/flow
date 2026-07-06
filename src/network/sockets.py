@@ -65,10 +65,14 @@ def true_connect(sock, address):
     :raises DifferentEncryption: if server doesn't have 
     the same encryption password as this socket.
     """
-    logger.info("Connecting socket to %s, handshaking encryption...", address)
+    logger.debug("Connecting socket to %s, handshaking encryption...", address)
     sock.settimeout(5.0)
     try:
         sock.connect(address)
+    except Exception as e:
+        raise e
+
+    try:
         sock.true_send('.')
         sock.true_recv()
         logger.info("Encryption handshake succeeded for outgoing connection to %s", address)
