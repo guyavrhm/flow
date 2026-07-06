@@ -9,13 +9,20 @@ import tempfile
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
 if sys.platform == 'win32':
-    DATABASE = os.path.join(os.getenv('APPDATA'), 'flow.db')
-    LOG_FILE = os.path.join(os.getenv('APPDATA'), 'flow.log')
+    FLOW_DIR = os.path.join(os.getenv('APPDATA'), 'flow')
     AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.dll')
 else:
-    DATABASE = os.path.expanduser('~/.flow.db')
-    LOG_FILE = os.path.expanduser('~/.flow.log')
+    FLOW_DIR = os.path.expanduser('~/.flow')
     AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.so')
+
+if not os.path.isdir(FLOW_DIR):
+    try:
+        os.makedirs(FLOW_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+DATABASE = os.path.join(FLOW_DIR, 'flow.db')
+LOG_FILE = os.path.join(FLOW_DIR, 'flow.log')
 
 TEMP_FLOW = os.path.join(tempfile.gettempdir(), "flow")
 
