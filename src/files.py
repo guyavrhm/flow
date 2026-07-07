@@ -32,3 +32,10 @@ WEB_PAGE = 'https://guyavrhm.github.io/flow'
 FLOW_PNG = os.path.join(BASE_DIR, 'resources', 'flow.png')
 FLOWX_PNG = os.path.join(BASE_DIR, 'resources', 'flowx.png')
 FLOWV_PNG = os.path.join(BASE_DIR, 'resources', 'flowv.png')
+
+# Clipboard scripts
+FILE2CLIP_MAC = os.path.join(BASE_DIR, 'hardware', 'clipboard', '_darwin', 'file2clip.applescript')
+GET_FILES_MAC = os.path.join(BASE_DIR, 'hardware', 'clipboard', '_darwin', 'getfiles.applescript')
+FILE2CLIP_WIN = os.path.join(BASE_DIR, 'hardware', 'clipboard', '_win32', 'file2clip.exe')
+
+

@@ -12,6 +12,23 @@ project_root = os.path.abspath(os.path.join(SPECPATH, '..')) if 'SPECPATH' in gl
 aes_lib_name = 'aes.dll' if sys.platform == 'win32' else 'aes.so'
 aes_lib_path = os.path.join(project_root, 'src', 'network', 'aes', aes_lib_name)
 
+hidden_imports = [
+    # pynput backends are loaded dynamically and need to be explicitly listed
+    'pynput.keyboard._darwin',
+    'pynput.keyboard._win32',
+    'pynput.keyboard._xorg',
+    'pynput.mouse._darwin',
+    'pynput.mouse._win32',
+    'pynput.mouse._xorg',
+    # PyQt5 components
+    'PyQt5.QtCore',
+    'PyQt5.QtGui',
+    'PyQt5.QtWidgets',
+]
+
+if sys.platform.startswith('linux'):
+    hidden_imports.append('evdev')
+
 a = Analysis(
     [os.path.join(project_root, 'flow.py')],
     pathex=[project_root],
@@ -21,20 +38,9 @@ a = Analysis(
     datas=[
         (os.path.join(project_root, 'src', 'resources', '*.png'), 'src/resources')
     ],
-    hiddenimports=[
-        # pynput backends are loaded dynamically and need to be explicitly listed
-        'pynput.keyboard._darwin',
-        'pynput.keyboard._win32',
-        'pynput.keyboard._xorg',
-        'pynput.mouse._darwin',
-        'pynput.mouse._win32',
-        'pynput.mouse._xorg',
-        # PyQt5 components
-        'PyQt5.QtCore',
-        'PyQt5.QtGui',
-        'PyQt5.QtWidgets',
-    ],
+    hiddenimports=hidden_imports,
     hookspath=[],
+
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],

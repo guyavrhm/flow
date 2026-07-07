@@ -126,22 +126,20 @@ class VirtualClipboard:
 
     def start(self):
         """
-        Starts the clipboard event listener and the receiving thread.
+        Starts the clipboard event listener.
         """
-        logger.info("Starting virtual clipboard helper (listener and receiver)")
+        logger.info("Starting virtual clipboard listener")
         self._on = True
         self._clipboard_listener = ClipboardListener(on_change=self.on_change, parent=None)
         self._clipboard_listener.start()
-        if self.__class__.__name__ != 'ServerClipboard':
-            self._receiving_t = flowThread(target=self.receive, parent=None)
-            self._receiving_t.start()
 
     def stop(self):
-        logger.info("Stopping virtual clipboard helper")
+        logger.info("Stopping virtual clipboard listener")
         self._on = False
         if self._clipboard_listener is not None:
             try:
                 self._clipboard_listener.stop()
+                self._clipboard_listener.wait()
                 self._clipboard_listener.deleteLater()
             except Exception as e:
                 logger.debug("Failed to clean up clipboard listener: %s", e)
@@ -164,6 +162,14 @@ class ClientClipboard(VirtualClipboard):
         super(ClientClipboard, self).__init__()
         # client class
         self.client = client
+
+    def start(self):
+        """
+        Starts the clipboard event listener and the client receiving thread.
+        """
+        super(ClientClipboard, self).start()
+        self._receiving_t = flowThread(target=self.receive, parent=None)
+        self._receiving_t.start()
 
     def receive(self):
         """

@@ -5,7 +5,8 @@ mouse functions
 
 import time
 import threading
-from pynput.mouse import Button, Controller as MouseController, Listener as MouseListener
+from pynput.mouse import Button, Controller as PynputMouseController, Listener as MouseListener
+
 
 import src.info.computerinfo as ci
 from src.ui.qtthread import flowThread
@@ -28,6 +29,18 @@ else:
 
 mbuttons['x2'] = mbuttons['button9'] = t1
 mbuttons['x1'] = mbuttons['button8'] = t2
+
+
+class MouseController(PynputMouseController):
+    def press(self, button):
+        if isinstance(button, str):
+            button = mbuttons.get(button, button)
+        super().press(button)
+
+    def release(self, button):
+        if isinstance(button, str):
+            button = mbuttons.get(button, button)
+        super().release(button)
 
 
 class LockedMouse(MouseListener):

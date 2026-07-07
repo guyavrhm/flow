@@ -2,7 +2,7 @@ import time
 import logging
 
 from src.hardware.keyboard import KeyboardController, KeyboardListener, key_from_str
-from src.hardware.mouse import LockedMouse, MouseController, MouseListener, mbuttons
+from src.hardware.mouse import LockedMouse, MouseController, MouseListener
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +141,9 @@ class ControlledDevices:
                     # data = True/False, button:
                     pressed, str_button = action
                     if pressed:
-                        self.mouse.press(mbuttons[str_button])
+                        self.mouse.press(str_button)
                     else:
-                        self.mouse.release(mbuttons[str_button])
+                        self.mouse.release(str_button)
 
                 elif cmd_type == "scrl":
                     # data = dx, dy

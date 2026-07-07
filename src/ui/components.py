@@ -24,12 +24,6 @@ def _init():
     from .qtsettings import SettingsWindow
     from .qttrayicon import TrayIcon
     from .qtblocker import ScreenBlocker
-    from src.hardware.clipboard import ClipboardHelper, handle_clipboard_changed
-    import src.hardware.clipboard as hc
-
-    # Initialize the clipboard helper and connect the system clipboard signal
-    hc.clipboard_helper = ClipboardHelper()
-    _app.clipboard().dataChanged.connect(handle_clipboard_changed)
 
     # Instantiate UI windows
     _settings = SettingsWindow()

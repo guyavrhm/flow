@@ -2,7 +2,7 @@ import time
 import threading
 import logging
 
-from pynput.mouse import Controller
+from src.hardware.mouse import MouseController
 
 from .transfer import SharedDevices
 from .vclipboard import ServerClipboard
@@ -63,9 +63,8 @@ class Machine:
             machine.mouse_position = (int(machine.metrics[0] / ratio), machine.metrics[1] - 8)
 
         if machine.is_server():  # is main
-            Controller().position = machine.mouse_position
-            Controller().position = machine.mouse_position
-            Controller().position = machine.mouse_position
+            MouseController().position = machine.mouse_position
+
 
     def close(self):
         logger.info("Closing connection and resources for machine: %s", self.address)
@@ -110,9 +109,10 @@ class Server(flowThread):
             self.machines[self.NAME] = Machine(
                 get_screeninfo(),
                 attachments,
-                mpos=Controller().position,
+                mpos=MouseController().position,
                 address=(self.NAME,)
             )
+
 
         # tcp and udp sockets
         logger.info("Binding server sockets on port 8118")
@@ -253,28 +253,27 @@ class Server(flowThread):
                 del self.machines[client_name]
             num_machines = len(self.machines)
 
-        if not is_active:
-            logger.debug("Client %s was not actively registered under this instance", client_name)
-            return
+            if not is_active:
+                logger.debug("Client %s was not actively registered under this instance", client_name)
+                return
 
-        try:
-            machine.close()
-        except Exception as e:
-            logger.debug("Exception while closing machine resources: %s", e)
+            try:
+                machine.close()
+            except Exception as e:
+                logger.debug("Exception while closing machine resources: %s", e)
 
-        self.machine_disconnected_signal.emit(client_name)
+            self.machine_disconnected_signal.emit(client_name)
 
-        if num_machines == 1:
-            logger.info("All clients disconnected. Emitting disconnect signal to UI.")
-            self.disconnect_signal.emit()
+            if num_machines == 1:
+                logger.info("All clients disconnected. Emitting disconnect signal to UI.")
+                self.disconnect_signal.emit()
 
-        if self.current == machine:
-            logger.info("Removed client %s was the active machine; reverting control to server", client_name)
-            if self.devices is not None:
-                self.devices.pause()
-                self.devices = None
-            self.hide_blocker_signal.emit()
-            with self.machines_lock:
+            if self.current == machine:
+                logger.info("Removed client %s was the active machine; reverting control to server", client_name)
+                if self.devices is not None:
+                    self.devices.pause()
+                    self.devices = None
+                self.hide_blocker_signal.emit()
                 self.current = self.machines[self.NAME]
 
     def runloop(self):
@@ -287,37 +286,35 @@ class Server(flowThread):
             with self.machines_lock:
                 is_main = (self.current == self.machines[self.NAME])
                 if is_main:
-                    self.machines[self.NAME].mouse_position = Controller().position
+                    self.machines[self.NAME].mouse_position = MouseController().position
 
-            try:
-                with self.machines_lock:
+                try:
                     edge = self.current.at_edge()
                     other = self.machines[edge] if edge in self.machines else None
-            except KeyError:
-                other = None
+                except KeyError:
+                    other = None
 
-            if other:
-                from_addr = self.current.address[0] if self.current.address else "Unknown"
-                to_addr = other.address[0] if other.address else "Unknown"
-                logger.info("Mouse reached edge. Transferring control from %s to %s", from_addr, to_addr)
-                self.current.pass_to(other)
+                if other:
+                    from_addr = self.current.address[0] if self.current.address else "Unknown"
+                    to_addr = other.address[0] if other.address else "Unknown"
+                    logger.info("Mouse reached edge. Transferring control from %s to %s", from_addr, to_addr)
+                    self.current.pass_to(other)
 
-                prev = self.current
-                self.current = other
-                
-                if self.devices != None:
-                    self.devices.pause()
+                    prev = self.current
+                    self.current = other
+                    
+                    if self.devices is not None:
+                        self.devices.pause()
 
-                if self.current.is_server():
-                    self.devices = None
-                    self.hide_blocker_signal.emit()
-                    prev.pass_to(self.current)
-
-                if not self.current.is_server():
-                    self.show_blocker_signal.emit()
-                    prev.pass_to(self.current)
-                    self.devices = SharedDevices(self.current)
-                    self.devices.share()
+                    if self.current.is_server():
+                        self.devices = None
+                        self.hide_blocker_signal.emit()
+                        prev.pass_to(self.current)
+                    else:
+                        self.show_blocker_signal.emit()
+                        prev.pass_to(self.current)
+                        self.devices = SharedDevices(self.current)
+                        self.devices.share()
 
             time.sleep(0.01)
 
@@ -327,12 +324,14 @@ class Server(flowThread):
         self._running = False
 
         # stop shared devices thread
-        if self.devices is not None:
-            try:
-                logger.info("Stopping shared devices")
-                self.devices.stop()
-            except Exception as e:
-                logger.debug("Error while stopping shared devices: %s", e)
+        with self.machines_lock:
+            if self.devices is not None:
+                try:
+                    logger.info("Stopping shared devices")
+                    self.devices.stop()
+                except Exception as e:
+                    logger.debug("Error while stopping shared devices: %s", e)
+                self.devices = None
 
         self.clipboard.stop()
 

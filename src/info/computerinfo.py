@@ -18,6 +18,18 @@ def supported():
     return platform == WINDOWS or platform == LINUX or platform == MACOS
 
 
+def is_wayland():
+    """
+    Returns True if the Linux environment is running a Wayland session.
+    """
+    import os
+    return platform == LINUX and (
+        os.environ.get('XDG_SESSION_TYPE') == 'wayland' or
+        'WAYLAND_DISPLAY' in os.environ
+    )
+
+
+
 def get_screeninfo():
     """
     Returns screen resolution of computer.
