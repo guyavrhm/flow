@@ -2,6 +2,8 @@ import os
 import time
 import shutil
 import logging
+import threading
+from collections import deque
 
 import src.info.computerinfo as ci
 
@@ -29,8 +31,9 @@ class VirtualClipboard:
         self._clipboard_listener = None
         # clipboard receiving thread
         self._receiving_t = None
-        # weather data is received or changed manually
-        self._received = False
+        # Thread-safe history of updates received from the network to prevent feedback loops
+        self._history_lock = threading.Lock()
+        self._received_history = deque(maxlen=3)
 
         self._on = False
 
@@ -94,13 +97,17 @@ class VirtualClipboard:
                     with open(TEMP_FLOW + self.DIR_SLASH + d['name'], 'wb') as f:
                         f.write(d['data'])
 
-            self._received = True
-            Clipboard.set_files([TEMP_FLOW + self.DIR_SLASH + f for f in os.listdir(TEMP_FLOW)])
+            # Normalize files to a sorted tuple of top-level paths under TEMP_FLOW
+            file_paths = tuple(sorted([TEMP_FLOW + self.DIR_SLASH + f for f in os.listdir(TEMP_FLOW)]))
+            with self._history_lock:
+                self._received_history.append(file_paths)
+            Clipboard.set_files(list(file_paths))
 
         else:
             text_preview = content[:50] + "..." if len(content) > 50 else content
             logger.info("Writing text data to local clipboard: '%s'", text_preview)
-            self._received = True
+            with self._history_lock:
+                self._received_history.append(content)
             Clipboard.set_text(content)
 
     def on_change(self, clip_content):
@@ -184,12 +191,26 @@ class ClientClipboard(VirtualClipboard):
         Sends clipboard data to server on clipboard change.
         """
         try:
-            if not self._received:
+            if isinstance(clip_content, (list, tuple)):
+                normalized_content = tuple(sorted(clip_content))
+            else:
+                normalized_content = clip_content
+
+            is_received = False
+            with self._history_lock:
+                if normalized_content in self._received_history:
+                    is_received = True
+                    try:
+                        self._received_history.remove(normalized_content)
+                    except ValueError:
+                        pass
+
+            if not is_received:
                 logger.info("Local clipboard changed; sending update to server")
                 formatted_content = self.format_data(clip_content)
                 self.client.tcp_sock.true_send(formatted_content)
-
-            self._received = False
+            else:
+                logger.info("Ignoring clipboard change; matched network received update")
 
         except Exception as e:
             logger.debug("Exception in client clipboard on_change: %s", e)
@@ -255,7 +276,21 @@ class ServerClipboard(VirtualClipboard):
         Sends clipboard content to all connected clients on clipboard change.
         """
         try:
-            if not self._received:
+            if isinstance(clip_content, (list, tuple)):
+                normalized_content = tuple(sorted(clip_content))
+            else:
+                normalized_content = clip_content
+
+            is_received = False
+            with self._history_lock:
+                if normalized_content in self._received_history:
+                    is_received = True
+                    try:
+                        self._received_history.remove(normalized_content)
+                    except ValueError:
+                        pass
+
+            if not is_received:
                 logger.info("Server local clipboard changed; broadcasting to all clients")
                 formatted_content = self.format_data(clip_content)
 
@@ -269,8 +304,9 @@ class ServerClipboard(VirtualClipboard):
                     except Exception as e:
                         logger.debug("Failed to broadcast clipboard update to %s: %s", m.address[0] if m.address else "Unknown", e)
                         pass
+            else:
+                logger.info("Ignoring server clipboard change; matched network received update")
 
-            self._received = False
         except Exception as e:
             logger.debug("Exception in server clipboard on_change: %s", e)
             pass
