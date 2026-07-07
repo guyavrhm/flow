@@ -7,6 +7,22 @@ src.logger.setup_logging()
 import logging
 logger = logging.getLogger(__name__)
 
+
+def handle_exception(exc_type, exc_value, exc_traceback):
+    """
+    Global exception hook to capture uncaught exceptions in the main thread.
+    Logs the error and cleanly exits the application.
+    """
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    logger.critical("Uncaught exception in main thread", exc_info=(exc_type, exc_value, exc_traceback))
+    sys.exit(1)
+
+
+sys.excepthook = handle_exception
+
 import src.info.computerinfo as computerinfo
 import src.network.sockets as socket
 

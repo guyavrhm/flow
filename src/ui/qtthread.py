@@ -1,4 +1,16 @@
 from PyQt5.QtCore import QThread, pyqtSignal
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def wrap_run(run_func, class_name):
+    def wrapped(self, *args, **kwargs):
+        try:
+            return run_func(self, *args, **kwargs)
+        except Exception as e:
+            logger.exception("Uncaught exception in background thread %s", self.objectName() or class_name)
+    return wrapped
 
 
 class flowThread(QThread):
@@ -21,11 +33,19 @@ class flowThread(QThread):
     # hide screen blocker signal
     hide_blocker_signal = pyqtSignal()
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if 'run' in cls.__dict__:
+            cls.run = wrap_run(cls.run, cls.__name__)
+
     def __init__(self, target=None, parent=None):
         super().__init__(parent)
         self._target = target
 
     def run(self):
-        if self._target:
-            self._target()
+        try:
+            if self._target:
+                self._target()
+        except Exception as e:
+            logger.exception("Uncaught exception in background thread %s", self.objectName() or self.__class__.__name__)
 
