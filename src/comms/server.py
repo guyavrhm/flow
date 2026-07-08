@@ -277,7 +277,6 @@ class Server(flowThread):
                 if self.devices is not None:
                     self.devices.pause()
                     self.devices = None
-                self.hide_blocker_signal.emit()
                 self.current = self.machines[self.NAME]
 
     def runloop(self):
@@ -312,10 +311,8 @@ class Server(flowThread):
 
                     if self.current.is_server():
                         self.devices = None
-                        self.hide_blocker_signal.emit()
                         prev.pass_to(self.current)
                     else:
-                        self.show_blocker_signal.emit()
                         prev.pass_to(self.current)
                         self.devices = SharedDevices(self.current)
                         self.devices.share()

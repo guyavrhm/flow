@@ -2,7 +2,7 @@ import time
 import logging
 
 from src.hardware.keyboard import KeyboardController, KeyboardListener, key_from_str
-from src.hardware.mouse import LockedMouse, MouseController, MouseListener
+from src.hardware.mouse import MouseController, MouseListener
 
 logger = logging.getLogger(__name__)
 
@@ -21,39 +21,52 @@ class SharedDevices:
         # current machine's udp socket
         self.socket = machine.udp_conn
         # devices which callback the events
-        self.lmouse = self.mouse = self.keyboard = None
+        self.mouse = self.keyboard = None
+        self._stopping = False
 
     def __on_move(self, x, y):
         """
         On move event. Sends 'mov <mouse_position>' to client
         """
-        self.machine.mouse_position = (self.machine.mouse_position[0] + x, self.machine.mouse_position[1] + y)
+        if self._stopping:
+            return
+        new_x = max(0, min(self.machine.mouse_position[0] + x, self.machine.metrics[0]))
+        new_y = max(0, min(self.machine.mouse_position[1] + y, self.machine.metrics[1]))
+        self.machine.mouse_position = (new_x, new_y)
         self.socket.true_sendto(
-            "mov " + str(self.machine.mouse_position[0]) + " " + str(self.machine.mouse_position[1]),
+            "mov " + str(new_x) + " " + str(new_y),
             self.machine.address)
 
     def __on_mouse_click(self, x, y, button, pressed):
         """
         On mouse click event. Sends 'prsm <button>' to client
         """
+        if self._stopping:
+            return
         self.socket.true_sendto(("prsm", pressed, str(button)[7:]), self.machine.address, special=True)
 
     def __on_mouse_scroll(self, x, y, dx, dy):
         """
         On scroll event. Sends 'scrl <dx dy>' to client
         """
+        if self._stopping:
+            return
         self.socket.true_sendto("scrl " + str(dx) + " " + str(dy), self.machine.address)
 
     def __on_keyboard_press(self, key):
         """
         On key press event. Sends 'prsk True <key>' to client
         """
+        if self._stopping:
+            return
         self.socket.true_sendto(("prsk", True, str(key)), self.machine.address, special=True)
 
     def __on_keyboard_release(self, key):
         """
         On key release event. Sends 'prsk False <key>' to client
         """
+        if self._stopping:
+            return
         self.socket.true_sendto(("prsk", False, str(key)), self.machine.address, special=True)
 
     def share(self):
@@ -61,22 +74,37 @@ class SharedDevices:
         Starts mouse and keyboard event capture
         """
         logger.info("Starting input device capture (mouse and keyboard sharing)")
-        self.lmouse = LockedMouse(on_move=self.__on_move)
-        self.mouse = MouseListener(on_click=self.__on_mouse_click, on_scroll=self.__on_mouse_scroll)
-        self.keyboard = KeyboardListener(on_press=self.__on_keyboard_press, on_release=self.__on_keyboard_release,
-                                         suppress=True)
-        self.lmouse.start()
+        self.mouse = MouseListener(
+            on_move=self.__on_move,
+            on_click=self.__on_mouse_click,
+            on_scroll=self.__on_mouse_scroll,
+            suppress=True
+        )
+        self.keyboard = KeyboardListener(
+            on_press=self.__on_keyboard_press,
+            on_release=self.__on_keyboard_release,
+            suppress=True
+        )
         self.mouse.start()
         self.keyboard.start()
 
     def pause(self):
         logger.info("Pausing/stopping input device capture")
         if self.mouse is not None:
-            for device in (self.mouse, self.lmouse, self.keyboard):
+            self._stopping = True
+            for device in (self.mouse, self.keyboard):
                 device.stop()
-            self.lmouse.wait()
-            self.mouse.join()
-            self.keyboard.join()
+
+            # Join them synchronously with a small timeout to prevent blocking the
+            # server edge tracking loop while ensuring thread resources are cleaned up.
+            try:
+                self.mouse.join(timeout=0.2)
+            except Exception as e:
+                logger.debug("Error joining mouse: %s", e)
+            try:
+                self.keyboard.join(timeout=0.2)
+            except Exception as e:
+                logger.debug("Error joining keyboard: %s", e)
 
     def stop(self):
         logger.info("Stopping shared devices helper and sending stop event to client")
@@ -119,7 +147,8 @@ class ControlledDevices:
                 cmd_type = data[0]
                 action = (data[1], data[2])
 
-                logger.debug("Processing command: %s with action: %s", cmd_type, action)
+                if cmd_type != "mov":
+                    logger.debug("Processing command: %s with action: %s", cmd_type, action)
 
                 if cmd_type == "mov":
                     x_pos, y_pos = action

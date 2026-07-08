@@ -37,30 +37,40 @@ class LinuxClipboard(BaseClipboard):
         """
         Returns clipboard data.
         """
-        # Try retrieving text/uri-list first
         try:
-            out_uris = subprocess.check_output(
-                ['xclip', '-o', '-selection', 'clipboard', '-t', 'text/uri-list'],
+            # Check supported targets first
+            targets_out = subprocess.check_output(
+                ['xclip', '-o', '-selection', 'clipboard', '-t', 'TARGETS'],
                 stderr=subprocess.DEVNULL
-            ).decode('utf-8', errors='replace').strip()
-
-            if out_uris:
-                # Convert URIs to file paths
-                lines = out_uris.splitlines()
-                paths = []
-                for line in lines:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    parsed = urllib.parse.urlparse(line)
-                    if parsed.scheme == 'file' or not parsed.scheme:
-                        path = urllib.parse.unquote(parsed.path)
-                        if path:
-                            paths.append(path)
-                if paths:
-                    return tuple(paths)
+            ).decode('utf-8', errors='replace')
+            targets = [t.strip() for t in targets_out.splitlines()]
         except Exception:
-            pass
+            targets = []
+
+        if 'text/uri-list' in targets:
+            try:
+                out_uris = subprocess.check_output(
+                    ['xclip', '-o', '-selection', 'clipboard', '-t', 'text/uri-list'],
+                    stderr=subprocess.DEVNULL
+                ).decode('utf-8', errors='replace').strip()
+
+                if out_uris:
+                    # Convert URIs to file paths
+                    lines = out_uris.splitlines()
+                    paths = []
+                    for line in lines:
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        parsed = urllib.parse.urlparse(line)
+                        if parsed.scheme == 'file' or not parsed.scheme:
+                            path = urllib.parse.unquote(parsed.path)
+                            if path:
+                                paths.append(path)
+                    if paths:
+                        return tuple(paths)
+            except Exception:
+                pass
 
         # Fallback to standard plain text
         try:

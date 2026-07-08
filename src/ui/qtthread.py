@@ -28,10 +28,6 @@ class flowThread(QThread):
     machine_connected_signal = pyqtSignal(str)
     # set machine disconnected signal
     machine_disconnected_signal = pyqtSignal(str)
-    # show screen blocker signal
-    show_blocker_signal = pyqtSignal()
-    # hide screen blocker signal
-    hide_blocker_signal = pyqtSignal()
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

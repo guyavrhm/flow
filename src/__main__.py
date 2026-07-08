@@ -26,7 +26,7 @@ sys.excepthook = handle_exception
 import src.hardware.info as computerinfo
 import src.network.sockets as socket
 
-from src.ui.components import app, settings, tray_icon, blocker
+from src.ui.components import app, settings, tray_icon
 from src.comms.server import Server
 from src.comms.client import Client
 from src.data.db import Settings, get_data, get_all_data
@@ -115,8 +115,6 @@ class Main:
             self.serverclient = Server()
             self.serverclient.machine_connected_signal.connect(settings.connect)
             self.serverclient.machine_disconnected_signal.connect(settings.disconnect)
-            self.serverclient.show_blocker_signal.connect(blocker.show)
-            self.serverclient.hide_blocker_signal.connect(blocker.hide)
 
         self.serverclient.connect_signal.connect(tray_icon.setConnected)
         self.serverclient.disconnect_signal.connect(tray_icon.setDisconnected)
