@@ -46,7 +46,7 @@ class AES:
         Encrypts 16 bytes of plaintext.
         """
 
-        np_data = np.frombuffer(data_16, dtype=np.uint8)
+        np_data = np.frombuffer(bytearray(data_16), dtype=np.uint8)
         self._aes_encrypt(ctypes.c_void_p(np_data.ctypes.data), self._k)
 
         return np_data.tobytes()
@@ -56,7 +56,7 @@ class AES:
         Decrypts 16 bytes of ciphertext.
         """
 
-        np_cipher = np.frombuffer(cipher_16, dtype=np.uint8)
+        np_cipher = np.frombuffer(bytearray(cipher_16), dtype=np.uint8)
         self._aes_decrypt(ctypes.c_void_p(np_cipher.ctypes.data), self._k)
 
         return np_cipher.tobytes()
