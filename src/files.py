@@ -22,6 +22,7 @@ DATABASE = os.path.join(FLOW_DIR, 'flow.db')
 LOG_FILE = os.path.join(FLOW_DIR, 'flow.log')
 
 TEMP_FLOW = os.path.join(tempfile.gettempdir(), "flow")
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB (temporary until streaming)
 
 WEB_PAGE = 'https://guyavrhm.github.io/flow'
 

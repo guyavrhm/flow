@@ -7,7 +7,7 @@ from collections import deque
 
 import src.hardware.info as ci
 
-from src.files import TEMP_FLOW
+from src.files import TEMP_FLOW, MAX_FILE_SIZE
 from src.hardware.clipboard import ClipboardListener, Clipboard
 from src.ui.qtthread import flowThread
 
@@ -48,6 +48,15 @@ class VirtualClipboard:
 
             for item in content:
                 if os.path.isfile(item):
+                    try:
+                        file_size = os.path.getsize(item)
+                    except Exception as e:
+                        logger.warning("Failed to get size for file %s: %s", item, e)
+                        continue
+
+                    if file_size > MAX_FILE_SIZE:
+                        logger.warning("Skipping file '%s' because its size (%d bytes) exceeds the 50MB limit.", item, file_size)
+                        continue
 
                     with open(item, 'rb') as fi:
                         contents = fi.read()
@@ -61,9 +70,24 @@ class VirtualClipboard:
                             files.append({'type': 'folder', 'name': dirpath + self.DIR_SLASH + d})
 
                         for f in filenames:
-                            with open(dirpath + self.DIR_SLASH + f, 'rb') as fi:
+                            full_path = dirpath + self.DIR_SLASH + f
+                            try:
+                                file_size = os.path.getsize(full_path)
+                            except Exception as e:
+                                logger.warning("Failed to get size for file %s: %s", full_path, e)
+                                continue
+
+                            if file_size > MAX_FILE_SIZE:
+                                logger.warning("Skipping file '%s' because its size (%d bytes) exceeds the 50MB limit.", full_path, file_size)
+                                continue
+
+                            with open(full_path, 'rb') as fi:
                                 contents = fi.read()
-                            files.append({'type': 'file', 'name': dirpath + self.DIR_SLASH + f, 'data': contents})
+                            files.append({'type': 'file', 'name': full_path, 'data': contents})
+
+            if not files:
+                logger.warning("No files to transmit (all files exceeded the size limit or failed to read).")
+                return None
 
             for f in files:
                 f['name'] = f['name'].replace(root_dir, '').replace('\\', '/')
@@ -211,7 +235,8 @@ class ClientClipboard(VirtualClipboard):
             if not is_received:
                 logger.info("Local clipboard changed; sending update to server")
                 formatted_content = self.format_data(clip_content)
-                self.client.tcp_sock.true_send(formatted_content)
+                if formatted_content is not None:
+                    self.client.tcp_sock.true_send(formatted_content)
             else:
                 logger.info("Ignoring clipboard change; matched network received update")
 
@@ -296,17 +321,17 @@ class ServerClipboard(VirtualClipboard):
             if not is_received:
                 logger.info("Server local clipboard changed; broadcasting to all clients")
                 formatted_content = self.format_data(clip_content)
-
-                with self.server.machines_lock:
-                    machines_list = list(self.server.machines.values())[1:]
-                logger.info("Broadcasting updated clipboard to %d clients", len(machines_list))
-                for m in machines_list:
-                    try:
-                        logger.info("Broadcasting clipboard update to client: %s", m.address[0] if m.address else "Unknown")
-                        m.tcp_conn.true_send(formatted_content)
-                    except Exception as e:
-                        logger.debug("Failed to broadcast clipboard update to %s: %s", m.address[0] if m.address else "Unknown", e)
-                        pass
+                if formatted_content is not None:
+                    with self.server.machines_lock:
+                        machines_list = list(self.server.machines.values())[1:]
+                    logger.info("Broadcasting updated clipboard to %d clients", len(machines_list))
+                    for m in machines_list:
+                        try:
+                            logger.info("Broadcasting clipboard update to client: %s", m.address[0] if m.address else "Unknown")
+                            m.tcp_conn.true_send(formatted_content)
+                        except Exception as e:
+                            logger.debug("Failed to broadcast clipboard update to %s: %s", m.address[0] if m.address else "Unknown", e)
+                            pass
             else:
                 logger.info("Ignoring server clipboard change; matched network received update")
 
