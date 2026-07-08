@@ -149,7 +149,11 @@ class Server(flowThread):
         self.clipboard.start()
 
         self._running = True
-        self.runloop()
+        try:
+            self.runloop()
+        finally:
+            logger.info("Server thread cleaning up resources...")
+            self.cleanup()
 
     def accept_clients(self):
         """
@@ -320,10 +324,20 @@ class Server(flowThread):
 
     def stop(self):
         logger.info("Stopping Server...")
-        # stop mainloop
         self._running = False
 
-        # stop shared devices thread
+        # Close sockets immediately on UI thread to release ports and unblock sockets
+        try:
+            self.udp_sock.close()
+        except Exception as e:
+            logger.debug("Error closing UDP socket: %s", e)
+        try:
+            self.tcp_sock.close()
+        except Exception as e:
+            logger.debug("Error closing TCP socket: %s", e)
+
+    def cleanup(self):
+        # Stop shared devices thread
         with self.machines_lock:
             if self.devices is not None:
                 try:
@@ -335,22 +349,14 @@ class Server(flowThread):
 
         self.clipboard.stop()
 
-        # close all connections of machines
+        # Close all connections of machines
         with self.machines_lock:
             machines_copy = list(self.machines.values())
         logger.info("Closing connections for all %d registered machines", len(machines_copy))
         for c in machines_copy:
             c.close()
 
-        # close accepting clients thread
-        try:
-            self.udp_sock.close()
-        except Exception as e:
-            logger.debug("Error closing UDP socket: %s", e)
-        try:
-            self.tcp_sock.close()
-        except Exception as e:
-            logger.debug("Error closing TCP socket: %s", e)
+        # Clean up accepting clients thread
         try:
             logger.info("Waiting for client acceptor thread to finish...")
             self.accept_clients_t.wait()

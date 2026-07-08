@@ -143,10 +143,9 @@ class Main:
         tray_icon.setIcon(tray_icon.ICON_DISCONNECTED)
         if self.serverclient is not None:
             self.serverclient.stop()
-            self.serverclient.wait()
-            self.serverclient.deleteLater()
+            self.serverclient.finished.connect(self.serverclient.deleteLater)
             self.serverclient = None
-            logger.info("Connection helper thread successfully stopped and cleaned up")
+            logger.info("Connection helper thread stop signal sent")
 
     def exit_flow(self):
         logger.info("Exiting flow application gracefully")

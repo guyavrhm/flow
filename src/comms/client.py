@@ -1,5 +1,6 @@
 import time
 import logging
+import threading
 
 from .transfer import ControlledDevices
 from .vclipboard import ClientClipboard
@@ -33,6 +34,7 @@ class Client(flowThread):
         self.clipboard = ClientClipboard(self)
 
         self._running = True
+        self.stop_event = threading.Event()
 
     def run(self):
         """
@@ -41,12 +43,16 @@ class Client(flowThread):
         logger.info("Starting Client connection flow...")
         self.init_connection()
 
-        if self.connected and self._running:
-            logger.info("Successfully connected. Starting clipboard listener and device control loop.")
-            self.clipboard.start()
-            self.devices.get_controlled()  # blocking
-        else:
-            logger.info("Client thread execution finished without active connection")
+        try:
+            if self.connected and self._running:
+                logger.info("Successfully connected. Starting clipboard listener and device control loop.")
+                self.clipboard.start()
+                self.devices.get_controlled()  # blocking
+            else:
+                logger.info("Client thread execution finished without active connection")
+        finally:
+            logger.info("Client thread cleaning up resources...")
+            self.cleanup()
 
     def init_connection(self):
         """
@@ -73,7 +79,7 @@ class Client(flowThread):
                     if last_logged_ip != server_ip:
                         logger.warning("Server IP is not configured in Settings. Please configure the IP address.")
                         last_logged_ip = server_ip
-                    time.sleep(2)
+                    self.stop_event.wait(2)
                     continue
 
                 if last_logged_ip != server_ip:
@@ -99,7 +105,7 @@ class Client(flowThread):
                     except Exception as ex:
                         logger.debug("Failed to close TCP socket during connection retry: %s", ex)
                 
-                time.sleep(retry_delay)
+                self.stop_event.wait(retry_delay)
                 continue
 
         if self.connected and self._running:
@@ -140,6 +146,7 @@ class Client(flowThread):
         self.waiting_for_connection = False
         self.clipboard._on = False
         self.devices._on = False
+        self.stop_event.set()
 
         if self.udp_sock is not None:
             try:
@@ -151,6 +158,8 @@ class Client(flowThread):
                 self.tcp_sock.close()
             except Exception as e:
                 logger.debug("Failed to close Client TCP socket: %s", e)
+
+    def cleanup(self):
         try:
             logger.info("Stopping client clipboard helper")
             self.clipboard.stop()
