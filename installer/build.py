@@ -131,6 +131,43 @@ def compile_c_library():
         sys.exit(1)
 
 
+def compile_windows_clipboard_helper():
+    if sys.platform != 'win32':
+        return
+        
+    print_banner("Compiling Windows Clipboard Helper")
+    cs_file = os.path.join(PROJECT_ROOT, 'src', 'hardware', 'clipboard', '_win32', 'file2clip.cs')
+    exe_file = os.path.join(PROJECT_ROOT, 'src', 'hardware', 'clipboard', '_win32', 'file2clip.exe')
+    
+    csc_path = shutil.which("csc")
+    if not csc_path:
+        # Standard .NET Framework installation directories
+        net_dirs = [
+            r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319",
+            r"C:\Windows\Microsoft.NET\Framework\v4.0.30319",
+        ]
+        for d in net_dirs:
+            p = os.path.join(d, "csc.exe")
+            if os.path.exists(p):
+                csc_path = p
+                break
+                
+    if not csc_path:
+        print("  [✗] C# Compiler (csc.exe) not found. Cannot compile file2clip.cs.")
+        print("      Please ensure .NET Framework is installed or csc is in your PATH.")
+        sys.exit(1)
+        
+    print(f"Compiling: {cs_file} -> {exe_file}")
+    cmd = [csc_path, f"/out:{exe_file}", "/target:winexe", cs_file]
+    print(f"Running command: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+        print("C# compilation completed successfully!")
+    except Exception as e:
+        print(f"Error during C# compilation: {e}")
+        sys.exit(1)
+
+
 def run_pyinstaller():
     print_banner("Running PyInstaller Packaging")
     
@@ -312,6 +349,7 @@ def main():
     check_requirements()
     prepare_icons()
     compile_c_library()
+    compile_windows_clipboard_helper()
     run_pyinstaller()
     
     # Generate OS-specific installers

@@ -29,15 +29,22 @@ hidden_imports = [
 if sys.platform.startswith('linux'):
     hidden_imports.append('evdev')
 
+datas = [
+    (os.path.join(project_root, 'src', 'resources', '*.png'), 'src/resources')
+]
+
+if sys.platform == 'darwin':
+    datas.append((os.path.join(project_root, 'src', 'hardware', 'clipboard', '_darwin', '*.applescript'), 'src/hardware/clipboard/_darwin'))
+elif sys.platform == 'win32':
+    datas.append((os.path.join(project_root, 'src', 'hardware', 'clipboard', '_win32', 'file2clip.exe'), 'src/hardware/clipboard/_win32'))
+
 a = Analysis(
     [os.path.join(project_root, 'flow.py')],
     pathex=[project_root],
     binaries=[
         (aes_lib_path, 'src/network/aes')
     ],
-    datas=[
-        (os.path.join(project_root, 'src', 'resources', '*.png'), 'src/resources')
-    ],
+    datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
 
