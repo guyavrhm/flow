@@ -4,11 +4,12 @@ import logging
 import time
 
 from src.files import FILE2CLIP_WIN
+from src.hardware.clipboard._base import BaseClipboard
 
 logger = logging.getLogger(__name__)
 
 
-class WindowsClipboard:
+class WindowsClipboard(BaseClipboard):
     """
     Windows Clipboard api
     """

@@ -5,7 +5,7 @@ import logging
 import threading
 from collections import deque
 
-import src.info.computerinfo as ci
+import src.hardware.info as ci
 
 from src.files import TEMP_FLOW
 from src.hardware.clipboard import ClipboardListener, Clipboard

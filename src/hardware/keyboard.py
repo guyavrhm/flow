@@ -5,7 +5,7 @@ keyboard functions
 
 from pynput.keyboard import Key, Listener as KeyboardListener, Controller as KeyboardController
 
-import src.info.computerinfo as ci
+import src.hardware.info as ci
 
 kbuttons = {
     'Key.alt': Key.alt,

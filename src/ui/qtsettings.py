@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QListWidget, QMainWindow
 from src.ui.qtscreens import GraphicView
 from src.files import FLOW_PNG
 from src.data.db import Settings, get_data, remove_screen, set_data
-from src.info.computerinfo import get_ip
+from src.network.sockets import get_ip
 from src.comms.server import Server
 
 import src.ui.msgs as msgs

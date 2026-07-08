@@ -23,7 +23,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = handle_exception
 
-import src.info.computerinfo as computerinfo
+import src.hardware.info as computerinfo
 import src.network.sockets as socket
 
 from src.ui.components import app, settings, tray_icon, blocker

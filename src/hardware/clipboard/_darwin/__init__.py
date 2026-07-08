@@ -1,9 +1,10 @@
 import subprocess
 
 from src.files import FILE2CLIP_MAC, GET_FILES_MAC
+from src.hardware.clipboard._base import BaseClipboard
 
 
-class MacOSClipboard:
+class MacOSClipboard(BaseClipboard):
     """
     MacOS Clipboard api
     """

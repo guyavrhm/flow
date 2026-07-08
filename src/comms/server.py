@@ -9,7 +9,7 @@ from .vclipboard import ServerClipboard
 
 from src.network.sockets import DifferentEncryption, socket
 from src.data.db import Screens, get_attachments
-from src.info.computerinfo import get_screeninfo
+from src.hardware.info import get_screeninfo
 from src.ui.qtthread import flowThread
 
 logger = logging.getLogger(__name__)

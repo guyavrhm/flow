@@ -8,7 +8,7 @@ import threading
 from pynput.mouse import Button, Controller as PynputMouseController, Listener as MouseListener
 
 
-import src.info.computerinfo as ci
+import src.hardware.info as ci
 from src.ui.qtthread import flowThread
 
 

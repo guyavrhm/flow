@@ -1,7 +1,7 @@
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt
 
-from src.info.computerinfo import get_screeninfo
+from src.hardware.info import get_screeninfo
 
 
 class ScreenBlocker(QtWidgets.QWidget):

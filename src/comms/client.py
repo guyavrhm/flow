@@ -7,7 +7,7 @@ from .vclipboard import ClientClipboard
 
 from src.data.db import Settings, get_data
 from src.network.sockets import DifferentEncryption, socket
-from src.info.computerinfo import get_screeninfo
+from src.hardware.info import get_screeninfo
 from src.ui.qtthread import flowThread
 
 logger = logging.getLogger(__name__)

@@ -145,6 +145,22 @@ def true_recvfrom(conn, buff):
         return pickle.loads(data), address
 
 
+def get_ip():
+    """
+    Returns local IP of computer using standard socket connection routing.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Connect to a dummy address (doesn't send any packets) to determine local IP routing
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
+
+
 # set socket.socket's new attributes
 setattr(socket.socket, 'true_send', true_send)
 setattr(socket.socket, 'true_recv', true_recv)

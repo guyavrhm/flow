@@ -1,9 +1,8 @@
 """
-File containing static methods used to obtain machine information.
+File containing static methods/constants used to obtain machine/platform information.
 """
 
 from sys import platform
-import socket
 from PyQt5.QtWidgets import QApplication
 
 WINDOWS = 'win32'
@@ -29,7 +28,6 @@ def is_wayland():
     )
 
 
-
 def get_screeninfo():
     """
     Returns screen resolution of computer.
@@ -43,19 +41,3 @@ def get_screeninfo():
             return size.width(), size.height()
     # Fallback to standard HD resolution if QApplication is not instantiated
     return 1920, 1080
-
-
-def get_ip():
-    """
-    Returns local IP of computer using standard socket connection routing.
-    """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # Connect to a dummy address (doesn't send any packets) to determine local IP routing
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = '127.0.0.1'
-    finally:
-        s.close()
-    return ip
