@@ -21,10 +21,7 @@ class VirtualClipboard:
     TCP communication
     """
 
-    if ci.platform == ci.WINDOWS:
-        DIR_SLASH = '\\'
-    else:
-        DIR_SLASH = '/'
+    DIR_SLASH = os.sep
 
     def __init__(self):
         # clipboard event listener

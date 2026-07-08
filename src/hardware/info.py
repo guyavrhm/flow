@@ -41,3 +41,20 @@ def get_screeninfo():
             return size.width(), size.height()
     # Fallback to standard HD resolution if QApplication is not instantiated
     return 1920, 1080
+
+
+def get_app_dir():
+    """
+    Returns the standard application config/data directory based on OS.
+    """
+    import os
+    if platform == WINDOWS:
+        return os.path.join(os.getenv('APPDATA'), 'flow')
+    return os.path.expanduser('~/.flow')
+
+
+def get_aes_extension():
+    """
+    Returns the shared library file extension for compiled AES code on this platform.
+    """
+    return 'dll' if platform == WINDOWS else 'so'

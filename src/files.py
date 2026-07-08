@@ -1,19 +1,16 @@
 """
 File location constants
 """
-import sys
 import os
 import tempfile
+
+from src.hardware.info import get_app_dir, get_aes_extension
 
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
-if sys.platform == 'win32':
-    FLOW_DIR = os.path.join(os.getenv('APPDATA'), 'flow')
-    AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.dll')
-else:
-    FLOW_DIR = os.path.expanduser('~/.flow')
-    AES_SO = os.path.join(BASE_DIR, 'network', 'aes', 'aes.so')
+FLOW_DIR = get_app_dir()
+AES_SO = os.path.join(BASE_DIR, 'network', 'aes', f'aes.{get_aes_extension()}')
 
 if not os.path.isdir(FLOW_DIR):
     try:

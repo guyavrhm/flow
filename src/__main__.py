@@ -65,13 +65,9 @@ class Main:
         """
         Opens the flow web-page.
         """
+        import webbrowser
         logger.info("Opening help webpage: %s", WEB_PAGE)
-        if computerinfo.platform == computerinfo.WINDOWS:
-            subprocess.Popen(f'start {WEB_PAGE}', shell=True)
-        elif computerinfo.platform == computerinfo.MACOS:
-            subprocess.Popen(f'open {WEB_PAGE}', shell=True)
-        else:
-            subprocess.Popen(f'sensible-browser {WEB_PAGE}', shell=True)
+        webbrowser.open(WEB_PAGE)
 
     @staticmethod
     def open_settings():
