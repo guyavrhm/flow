@@ -1,6 +1,6 @@
-; Inno Setup Script for flow
+; Inno Setup Script for flow (Rust Version)
 #define MyAppName "flow"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "Guy Avraham"
 #define MyAppURL "https://github.com/guyavrhm/flow"
 #define MyAppExeName "flow.exe"
@@ -20,7 +20,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
 OutputBaseFilename=flow.setup
-SetupIconFile=..\src\resources\flow.ico
+SetupIconFile=..\resources\flow.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -32,12 +32,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; Package the entire dist/flow output folder
-Source: "..\dist\flow\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+; Package the compiled Cargo release output
+Source: "..\target\release\flow.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\resources\*"; DestDir: "{app}\resources"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\src\resources\flow.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\src\resources\flow.ico"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\resources\flow.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\resources\flow.ico"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

@@ -20,69 +20,84 @@ jobs:
             os-name: Windows
             artifact-prefix: flow-windows
             extension: setup.exe
-            local-path: dist/flow.setup.exe
           - os: ubuntu-latest
             os-name: Linux
             artifact-prefix: flow-linux
             extension: tar.gz
-            local-path: dist/flow.tar.gz
           - os: macos-13
             os-name: macOS Intel
             artifact-prefix: flow-macos-intel
             extension: dmg
-            local-path: dist/flow.dmg
           - os: macos-14
             os-name: macOS Apple Silicon
             artifact-prefix: flow-macos-arm64
             extension: dmg
-            local-path: dist/flow.dmg
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up MinGW (Windows only)
-        if: matrix.os == 'windows-latest'
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
+      - name: Cargo Cache
+        uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
+      - name: Install Linux dependencies (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst-dev libxmu-dev libasound2-dev
 
-      - name: Run build script
-        run: python installer/build.py
+      - name: Build Release Binary
+        run: cargo build --release --locked
 
-      - name: Rename and prepare artifacts
+      - name: Build Windows Setup Installer (Windows only)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -eq "") { $tag = "dev" }
+          # Compile Inno Setup Installer
+          iscc installer/flow.iss
+          # Rename output installer file to match matrices prefix
+          Move-Item -Path "dist/flow.setup.exe" -Destination "${{ matrix.artifact-prefix }}-$tag.${{ matrix.extension }}"
+
+      - name: Build macOS DMG Installer (macOS only)
+        if: startsWith(matrix.os, 'macos-')
         shell: bash
         run: |
           TAG_NAME="${{ github.ref_name }}"
-          FINAL_NAME="${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}"
-          echo "FINAL_NAME=${FINAL_NAME}" >> $GITHUB_ENV
-          if [ -f "${{ matrix.local-path }}" ]; then
-            mv "${{ matrix.local-path }}" "${FINAL_NAME}"
-          elif [ "${{ matrix.os-name }}" = "Windows" ] && [ -f "dist/flow-windows.zip" ]; then
-            mv "dist/flow-windows.zip" "${{ matrix.artifact-prefix }}-${TAG_NAME}.zip"
-            echo "FINAL_NAME=${{ matrix.artifact-prefix }}-${TAG_NAME}.zip" >> $GITHUB_ENV
-          else
-            echo "Error: Output file not found!"
-            exit 1
-          fi
+          if [ -z "$TAG_NAME" ]; then TAG_NAME="dev"; fi
+          # Prepare temporary bundle directory
+          mkdir -p dmg_root/flow
+          cp target/release/flow dmg_root/flow/flow
+          cp -r resources dmg_root/flow/resources
+          # Build native macOS DMG using hdiutil
+          hdiutil create -volname "flow" -srcfolder dmg_root/flow -ov -format UDZO "${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}"
+
+      - name: Build Linux tar.gz Bundle (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          if [ -z "$TAG_NAME" ]; then TAG_NAME="dev"; fi
+          mkdir -p dist
+          cp target/release/flow dist/flow
+          cp -r resources dist/resources
+          cp installer/setup_linux.sh dist/setup.sh
+          cp installer/flow.desktop dist/
+          tar -czf "${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}" -C dist flow resources setup.sh flow.desktop
 
       - name: Determine upload asset
         id: asset
         shell: bash
         run: |
-          if [ -f "${{ env.FINAL_NAME }}" ]; then
-            echo "file=${{ env.FINAL_NAME }}" >> $GITHUB_OUTPUT
+          TAG_NAME="${{ github.ref_name }}"
+          if [ -z "$TAG_NAME" ]; then TAG_NAME="dev"; fi
+          FILE_NAME="${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}"
+          if [ -f "$FILE_NAME" ]; then
+            echo "file=$FILE_NAME" >> $GITHUB_OUTPUT
           else
             echo "No artifact found to upload!"
             exit 1

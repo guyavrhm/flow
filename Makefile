@@ -1,17 +1,18 @@
-ifeq ($(OS),Windows_NT)
+.PHONY: build run test fmt clean
 
-all: aes-win
+all: build
 
-aes-win: src/network/aes/aes.c src/network/aes/gmult.c
-	gcc -fPIC -shared -o src/network/aes/aes.dll src/network/aes/aes.c src/network/aes/gmult.c
+build:
+	cargo build --release
 
-else
+run:
+	cargo run
 
-UNAME_S := $(shell uname -s)
+test:
+	cargo test
 
-all: aes-unix
+fmt:
+	cargo fmt
 
-aes-unix: src/network/aes/aes.c src/network/aes/gmult.c
-	gcc -fPIC -shared -o src/network/aes/aes.so src/network/aes/aes.c src/network/aes/gmult.c
-
-endif
+clean:
+	cargo clean

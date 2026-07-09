@@ -25,3 +25,8 @@ Thumbs.db
 # Resource cache
 /src/resources/flow.icns
 /src/resources/flow.ico
+
+
+# Added by cargo
+
+/target

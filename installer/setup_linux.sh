@@ -25,34 +25,35 @@ mkdir -p "$ICON_DIR"
 
 # Check if pre-compiled files exist in the unpacked directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIST_DIR="$SCRIPT_DIR/flow"
+DIST_DIR="$SCRIPT_DIR" # Flow bundle contents are unpacked directly alongside setup_linux.sh
 
-if [ ! -d "$DIST_DIR" ]; then
-    echo "Error: Could not find compiled flow directory at '$DIST_DIR'."
-    echo "Please run build.py to generate the build folder first, or verify the tar.gz contents."
+if [ ! -f "$DIST_DIR/flow" ]; then
+    echo "Error: Could not find compiled flow binary at '$DIST_DIR/flow'."
+    echo "Please build the project using 'make build' first, or verify the tar.gz contents."
     exit 1
 fi
 
 # Copy application files
 echo "Copying application folder..."
-INSTALL_OPT_DIR="/opt/flow"
 if [ "$EUID" -eq 0 ]; then
+    INSTALL_OPT_DIR="/opt/flow"
     mkdir -p "$INSTALL_OPT_DIR"
-    cp -r "$DIST_DIR"/* "$INSTALL_OPT_DIR/"
+    cp "$DIST_DIR/flow" "$INSTALL_OPT_DIR/"
+    cp -r "$DIST_DIR/resources" "$INSTALL_OPT_DIR/"
     # Create symlink in bin directory
     ln -sf "$INSTALL_OPT_DIR/flow" "$BIN_DIR/flow"
 else
-    # For local user, we can store it in ~/.local/share/flow
     INSTALL_OPT_DIR="$HOME/.local/share/flow"
     mkdir -p "$INSTALL_OPT_DIR"
-    cp -r "$DIST_DIR"/* "$INSTALL_OPT_DIR/"
+    cp "$DIST_DIR/flow" "$INSTALL_OPT_DIR/"
+    cp -r "$DIST_DIR/resources" "$INSTALL_OPT_DIR/"
     # Create symlink in bin directory
     ln -sf "$INSTALL_OPT_DIR/flow" "$BIN_DIR/flow"
 fi
 
 # Copy icon
-if [ -f "$DIST_DIR/src/resources/flow.png" ]; then
-    cp "$DIST_DIR/src/resources/flow.png" "$ICON_DIR/flow.png"
+if [ -f "$DIST_DIR/resources/flow.png" ]; then
+    cp "$DIST_DIR/resources/flow.png" "$ICON_DIR/flow.png"
 fi
 
 # Copy desktop entry
@@ -100,6 +101,4 @@ else
     echo ""
 fi
 
-echo "Installation complete!"
-echo "You can now run flow from your application menu or by typing 'flow' in the terminal."
-
+echo "flow installation complete! You can start it from your application menu or by running 'flow'."

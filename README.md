@@ -46,9 +46,8 @@ flow sends data through the local network, fast and securly, for you to have an 
 Run the following commands in your terminal:
 ```bash
 git clone https://github.com/guyavrhm/flow && cd flow
-python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
-make
-python flow.py
+make build
+make run
 ```
 
 
