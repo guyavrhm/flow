@@ -5,11 +5,11 @@
 ![GitHub contributors](https://img.shields.io/github/contributors/guyavrhm/flow)
 ![GitHub licence](https://img.shields.io/github/license/guyavrhm/flow)
 
-flow is a cross-platform virtual KVM software which allows control of multiple computers with multiple operating systems with one mouse and keyboard.
+flow is a cross-platform virtual KVM software which allows control of multiple computers running different operating systems with one mouse and keyboard.
 
 ![flow-demo](./img/flow-demo.gif)
 
-flow sends data through the local network, fast and securly, for you to have an effortless and cohesive experience. Simply move your mouse from one computer to another, flow will do all the work...
+Built in Rust, flow is designed to be highly efficient, secure, and modular (see [`ARCHITECTURE.md`](ARCHITECTURE.md)).
 
 <br>
 
