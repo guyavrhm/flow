@@ -624,7 +624,7 @@ impl MouseListener {
             );
 
             if tap.is_null() {
-                eprintln!(
+                log::error!(
                     "Failed to create mouse event tap! Accessibility permissions are required."
                 );
                 return;
@@ -848,7 +848,7 @@ impl KeyboardListener {
             );
 
             if tap.is_null() {
-                eprintln!(
+                log::error!(
                     "Failed to create keyboard event tap! Accessibility permissions are required."
                 );
                 return;

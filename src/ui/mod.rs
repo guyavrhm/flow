@@ -58,17 +58,24 @@ impl FlowApp {
     }
 
     fn save_changes(&mut self) {
+        log::info!("UI: Saving changes to settings and screen layout...");
         if let Err(e) = save_settings(&self.settings) {
+            log::error!("UI: Failed to save settings to DB: {:?}", e);
             self.status_msg = format!("Failed to save settings: {:?}", e);
             return;
         }
 
         let computed = self.canvas.compute_attachments();
         for (name, att) in computed {
-            let _ = update_screen(&name, &att);
+            if let Err(e) = update_screen(&name, &att) {
+                log::error!("UI: Failed to update screen layout for {} in DB: {:?}", name, e);
+            } else {
+                log::debug!("UI: Updated screen attachments for {}", name);
+            }
         }
 
         self.status_msg = "Settings saved successfully!".to_string();
+        log::info!("UI: Settings and screen layout saved successfully. Triggering engine reload.");
 
         let engine = self.engine.clone();
         std::thread::spawn(move || {
@@ -81,10 +88,15 @@ impl eframe::App for FlowApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if event.id.0 == self.tray.menu_settings_id {
+                log::info!("Tray: Settings menu item clicked");
                 self.show_window = true;
             } else if event.id.0 == self.tray.menu_help_id {
-                let _ = webbrowser::open("https://guyavrhm.github.io/flow");
+                log::info!("Tray: Help menu item clicked");
+                if let Err(e) = webbrowser::open("https://guyavrhm.github.io/flow") {
+                    log::error!("Tray: Failed to open help URL in browser: {:?}", e);
+                }
             } else if event.id.0 == self.tray.menu_exit_id {
+                log::info!("Tray: Exit menu item clicked. Terminating application.");
                 self.engine.stop();
                 std::process::exit(0);
             }
@@ -232,7 +244,10 @@ impl eframe::App for FlowApp {
                                             }
                                         }
                                         if let Some(r_name) = to_remove {
-                                            let _ = remove_screen(&r_name);
+                                            log::info!("UI: Deleting screen: {}", r_name);
+                                            if let Err(e) = remove_screen(&r_name) {
+                                                log::error!("UI: Failed to remove screen {} from DB: {:?}", r_name, e);
+                                            }
                                             self.canvas.screens.remove(&r_name);
                                             if self.canvas.selected_screen.as_ref() == Some(&r_name)
                                             {

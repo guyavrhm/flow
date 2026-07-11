@@ -79,6 +79,8 @@ impl AppEngine {
             s.clone()
         };
 
+        log::info!("Starting AppEngine (mode: {})", if settings.pc == 1 { "Server" } else { "Client" });
+
         if settings.pc == 1 {
             // Start Server Mode
             self.start_server(settings);
@@ -89,6 +91,7 @@ impl AppEngine {
     }
 
     pub fn stop(&self) {
+        log::info!("Stopping AppEngine...");
         let mut running = self.is_running.lock().unwrap();
         if !*running {
             return;
@@ -116,11 +119,11 @@ impl AppEngine {
         let mut conn = self.is_connected.lock().unwrap();
         *conn = false;
 
-        println!("AppEngine stopped");
+        log::info!("AppEngine stopped");
     }
 
     pub fn reload(&self) {
-        println!("Reloading AppEngine...");
+        log::info!("Reloading AppEngine...");
         self.stop();
         // Load fresh settings from DB
         if let Ok(fresh) = get_settings() {
@@ -133,7 +136,7 @@ impl AppEngine {
     }
 
     fn start_server(&self, settings: SettingsData) {
-        println!("Starting Server Mode");
+        log::info!("Starting Server Mode");
 
         let active_clients = self.active_clients.clone();
         let current_controlled = self.current_controlled.clone();
@@ -144,7 +147,7 @@ impl AppEngine {
         let udp_server = match UdpServer::new() {
             Ok(u) => u,
             Err(e) => {
-                eprintln!("Failed to bind UDP server: {:?}", e);
+                log::error!("Failed to bind UDP server: {:?}", e);
                 return;
             }
         };
@@ -160,7 +163,7 @@ impl AppEngine {
 
         // TCP callbacks
         let on_connect = move |ip: String, metrics: ScreenMetrics| {
-            println!("Server: Client connected: {}", ip);
+            log::info!("Server: Client connected: {}", ip);
             {
                 let mut conn = is_connected.lock().unwrap();
                 *conn = true;
@@ -207,7 +210,7 @@ impl AppEngine {
         let keyboard_listener_disc = self.keyboard_listener.clone();
 
         let on_disconnect = move |ip: String| {
-            println!("Server: Client disconnected: {}", ip);
+            log::info!("Server: Client disconnected: {}", ip);
             let mut clients = active_clients_disc.lock().unwrap();
             clients.remove(&ip);
 
@@ -236,6 +239,7 @@ impl AppEngine {
                 ClipboardPayload::Text { text } => text.clone(),
                 ClipboardPayload::Files { files } => format!("files:{}", files.len()),
             };
+            log::info!("Server: Received clipboard update from client {}: {}", from_ip, data_repr);
 
             {
                 let mut history = clipboard_history.lock().unwrap();
@@ -268,7 +272,7 @@ impl AppEngine {
             self.tcp_server
                 .start(settings, on_connect, on_disconnect, on_clipboard_recv)
         {
-            eprintln!("TCP Server failed to start: {:?}", e);
+            log::error!("TCP Server failed to start: {:?}", e);
             return;
         }
 
@@ -351,7 +355,7 @@ impl AppEngine {
                 }
 
                 if let Some(ref target) = next_controlled {
-                    println!("Edge reached! Transferring control from main to {}", target);
+                    log::info!("Edge reached! Transferring control from main to {}", target);
                     {
                         let mut curr = current_controlled.lock().unwrap();
                         *curr = target.clone();
@@ -474,6 +478,7 @@ impl AppEngine {
 
                     let ml = MouseListener::new(on_move, on_click, on_scroll, true);
                     ml.start();
+                    log::debug!("Server: Initialized and started local mouse event listener.");
                     {
                         let mut ml_lock = mouse_listener.lock().unwrap();
                         *ml_lock = Some(ml);
@@ -528,6 +533,7 @@ impl AppEngine {
 
                     let kl = KeyboardListener::new(on_press, on_release, true);
                     kl.start();
+                    log::debug!("Server: Initialized and started local keyboard event listener.");
                     {
                         let mut kl_lock = keyboard_listener.lock().unwrap();
                         *kl_lock = Some(kl);
@@ -567,7 +573,7 @@ impl AppEngine {
                     };
 
                     if !is_from_network {
-                        println!("Server: Local clipboard changed; broadcasting update");
+                        log::info!("Server: Local clipboard changed; broadcasting update");
                         let payload =
                             if data.contains('\n') && (data.contains('/') || data.contains('\\')) {
                                 if let Some(file_payload) = format_clipboard_data(&data) {
@@ -593,7 +599,7 @@ impl AppEngine {
     // --- Client Mode ---
 
     fn start_client(&self, settings: SettingsData) {
-        println!("Starting Client Mode");
+        log::info!("Starting Client Mode");
 
         let server_ip = settings.ip.clone();
         let is_connected = self.is_connected.clone();
@@ -601,7 +607,7 @@ impl AppEngine {
         let settings_clone = settings.clone();
 
         let on_connect = move || {
-            println!("Client: Connected to server");
+            log::info!("Client: Connected to server");
             {
                 let mut conn = is_connected.lock().unwrap();
                 *conn = true;
@@ -613,7 +619,7 @@ impl AppEngine {
         let is_connected_disc = self.is_connected.clone();
         let udp_client_disc = self.udp_client.clone();
         let on_disconnect = move || {
-            println!("Client: Disconnected from server");
+            log::info!("Client: Disconnected from server");
             {
                 let mut conn = is_connected_disc.lock().unwrap();
                 *conn = false;
@@ -627,6 +633,7 @@ impl AppEngine {
                 ClipboardPayload::Text { text } => text.clone(),
                 ClipboardPayload::Files { files } => format!("files:{}", files.len()),
             };
+            log::info!("Client: Received clipboard update from server: {}", data_repr);
 
             {
                 let mut history = clipboard_history.lock().unwrap();
@@ -655,7 +662,7 @@ impl AppEngine {
                 on_disconnect,
                 on_clipboard_recv,
             ) {
-                eprintln!("TCP Client failed to connect: {:?}", e);
+                log::error!("TCP Client failed to connect: {:?}", e);
             }
         });
 
@@ -692,7 +699,7 @@ impl AppEngine {
                     };
 
                     if !is_from_network {
-                        println!("Client: Local clipboard changed; sending to server");
+                        log::info!("Client: Local clipboard changed; sending to server");
                         let payload =
                             if data.contains('\n') && (data.contains('/') || data.contains('\\')) {
                                 if let Some(file_payload) = format_clipboard_data(&data) {
@@ -737,7 +744,7 @@ pub(crate) fn handle_client_edge_transition(
     };
 
     if target == "main" {
-        println!("Edge reached on Client! Transferring control to Server");
+        log::info!("Edge reached on Client! Transferring control to Server");
 
         let enter_pos = match side {
             1 => (8, (server_metrics.1 as f64 / ratio) as i32),
@@ -775,7 +782,7 @@ pub(crate) fn handle_client_edge_transition(
     } else {
         let clients = active_clients.lock().unwrap();
         if let Some(next_client) = clients.get(target) {
-            println!(
+            log::info!(
                 "Edge reached on Client! Transferring control directly to client: {}",
                 target
             );
@@ -816,6 +823,8 @@ pub(crate) fn handle_client_edge_transition(
                     c.mouse_y = enter_pos.1;
                 }
             }
+        } else {
+            log::warn!("Edge transition target client {} not found in active clients list", target);
         }
     }
 }
@@ -838,22 +847,29 @@ fn format_clipboard_data(paths_str: &str) -> Option<ClipboardPayload> {
     for path_str in paths {
         let path = std::path::Path::new(path_str);
         if !path.exists() {
+            log::warn!("Clipboard: Path does not exist: {:?}", path);
             continue;
         }
 
         if path.is_file() {
             if let Ok(metadata) = std::fs::metadata(path) {
                 if metadata.len() > max_file_size {
+                    log::warn!("Clipboard: Skipping {:?} (size {} bytes exceeds max limit of 50 MB)", path, metadata.len());
                     continue;
                 }
             }
-            if let Ok(data) = std::fs::read(path) {
-                if let Ok(rel) = path.strip_prefix(root_dir) {
-                    files.push(crate::network::protocol::ClipboardFile {
-                        is_dir: false,
-                        name: rel.to_string_lossy().to_string().replace('\\', "/"),
-                        data: Some(data),
-                    });
+            match std::fs::read(path) {
+                Ok(data) => {
+                    if let Ok(rel) = path.strip_prefix(root_dir) {
+                        files.push(crate::network::protocol::ClipboardFile {
+                            is_dir: false,
+                            name: rel.to_string_lossy().to_string().replace('\\', "/"),
+                            data: Some(data),
+                        });
+                    }
+                }
+                Err(e) => {
+                    log::error!("Clipboard: Failed to read file {:?}: {:?}", path, e);
                 }
             }
         } else if path.is_dir() {
@@ -878,15 +894,21 @@ fn format_clipboard_data(paths_str: &str) -> Option<ClipboardPayload> {
                     if entry_path.is_file() {
                         if let Ok(metadata) = std::fs::metadata(entry_path) {
                             if metadata.len() > max_file_size {
+                                log::warn!("Clipboard: Skipping nested file {:?} (size {} bytes exceeds max limit of 50 MB)", entry_path, metadata.len());
                                 continue;
                             }
                         }
-                        if let Ok(data) = std::fs::read(entry_path) {
-                            files.push(crate::network::protocol::ClipboardFile {
-                                is_dir: false,
-                                name: rel_name,
-                                data: Some(data),
-                            });
+                        match std::fs::read(entry_path) {
+                            Ok(data) => {
+                                files.push(crate::network::protocol::ClipboardFile {
+                                    is_dir: false,
+                                    name: rel_name,
+                                    data: Some(data),
+                                });
+                            }
+                            Err(e) => {
+                                log::error!("Clipboard: Failed to read nested file {:?}: {:?}", entry_path, e);
+                            }
                         }
                     } else if entry_path.is_dir() {
                         files.push(crate::network::protocol::ClipboardFile {
@@ -903,14 +925,18 @@ fn format_clipboard_data(paths_str: &str) -> Option<ClipboardPayload> {
     if files.is_empty() {
         None
     } else {
+        log::debug!("Clipboard: Formatted {} clipboard files to payload", files.len());
         Some(ClipboardPayload::Files { files })
     }
 }
 
 fn write_clipboard_files(files: &[crate::network::protocol::ClipboardFile]) -> Vec<String> {
     let temp_dir = std::env::temp_dir().join("flow");
+    log::debug!("Clipboard: Writing {} received files/directories to temporary folder {:?}", files.len(), temp_dir);
     let _ = std::fs::remove_dir_all(&temp_dir);
-    let _ = std::fs::create_dir_all(&temp_dir);
+    if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+        log::error!("Clipboard: Failed to create temp directory {:?}: {:?}", temp_dir, e);
+    }
 
     let mut top_level_paths = Vec::new();
 
@@ -921,9 +947,13 @@ fn write_clipboard_files(files: &[crate::network::protocol::ClipboardFile]) -> V
         }
 
         if file.is_dir {
-            let _ = std::fs::create_dir_all(&dest_path);
+            if let Err(e) = std::fs::create_dir_all(&dest_path) {
+                log::error!("Clipboard: Failed to create directory {:?}: {:?}", dest_path, e);
+            }
         } else if let Some(ref data) = file.data {
-            let _ = std::fs::write(&dest_path, data);
+            if let Err(e) = std::fs::write(&dest_path, data) {
+                log::error!("Clipboard: Failed to write file {:?}: {:?}", dest_path, e);
+            }
         }
 
         let mut components = dest_path.strip_prefix(&temp_dir).unwrap().components();

@@ -41,7 +41,7 @@ impl TcpServer {
         let port = 8118;
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
         listener.set_nonblocking(true)?; // Set non-blocking to allow clean thread exit on stop()
-        println!("TCP Server listening on port {}", port);
+        log::info!("TCP Server listening on port {}", port);
 
         let running = self.running.clone();
         {
@@ -79,7 +79,7 @@ impl TcpServer {
                                 Err(_) => return,
                             };
 
-                            println!("TCP: Connection from {}", ip);
+                            log::info!("TCP: Connection from {}", ip);
 
                             // Explicitly set stream back to blocking since it was accepted from non-blocking listener
                             stream.set_nonblocking(false).unwrap();
@@ -94,7 +94,7 @@ impl TcpServer {
                             match true_recv(&mut stream, &key_inner) {
                                 Ok(bytes) => {
                                     if bytes != b"." {
-                                        println!(
+                                        log::warn!(
                                             "TCP Handshake failed for client {}: mismatch payload",
                                             ip
                                         );
@@ -102,7 +102,7 @@ impl TcpServer {
                                     }
                                 }
                                 Err(e) => {
-                                    println!(
+                                    log::error!(
                                         "TCP Handshake failed for client {}: decryption error {:?}",
                                         ip, e
                                     );
@@ -111,7 +111,7 @@ impl TcpServer {
                             }
 
                             if true_send(&mut stream, b".", &key_inner).is_err() {
-                                println!("TCP Handshake failed: could not send response to {}", ip);
+                                log::warn!("TCP Handshake failed: could not send response to {}", ip);
                                 return;
                             }
 
@@ -131,7 +131,7 @@ impl TcpServer {
                                     Err(_) => return,
                                 };
 
-                            println!("TCP: Client {} metrics: {:?}", ip, metrics);
+                            log::debug!("TCP: Client {} metrics: {:?}", ip, metrics);
 
                             // Load attachments
                             let attachments =
@@ -161,8 +161,10 @@ impl TcpServer {
                                 match true_recv(&mut stream, &key_inner) {
                                     Ok(payload_bytes) => {
                                         if payload_bytes.is_empty() {
+                                            log::debug!("TCP Server: Received empty payload (EOF) from {}", ip);
                                             break;
                                         }
+                                        log::debug!("TCP Server: Received clipboard payload from {}", ip);
                                         if let Ok(payload) =
                                             serde_json::from_slice::<ClipboardPayload>(
                                                 &payload_bytes,
@@ -171,14 +173,15 @@ impl TcpServer {
                                             on_clip(payload, ip.clone());
                                         }
                                     }
-                                    Err(_) => {
+                                    Err(e) => {
+                                        log::debug!("TCP Server: Read error from {}: {:?}", ip, e);
                                         break;
                                     }
                                 }
                             }
 
                             // Cleanup client
-                            println!("TCP: Client {} disconnected", ip);
+                            log::info!("TCP: Client {} disconnected", ip);
                             {
                                 let mut list = clients_inner.lock().unwrap();
                                 list.retain(|c| {
@@ -204,6 +207,7 @@ impl TcpServer {
     }
 
     pub fn stop(&self) {
+        log::info!("Stopping TCP Server");
         let mut r = self.running.lock().unwrap();
         *r = false;
         // Close all clients
@@ -221,6 +225,7 @@ impl TcpServer {
         exclude_ip: Option<&str>,
         settings: &SettingsData,
     ) {
+        log::debug!("TCP: Broadcasting clipboard (excluding client: {:?})", exclude_ip);
         let payload_bytes = serde_json::to_vec(payload).unwrap();
         let key = CryptoKey::new(&settings.password);
 
@@ -264,7 +269,7 @@ impl TcpClient {
         FClip: Fn(ClipboardPayload) + Send + Sync + 'static,
     {
         let server_addr = format!("{}:8118", server_ip);
-        println!("TCP Client connecting to {}...", server_addr);
+        log::info!("TCP Client connecting to {}...", server_addr);
 
         let mut stream =
             TcpStream::connect_timeout(&server_addr.parse().unwrap(), Duration::from_secs(5))?;
@@ -291,7 +296,7 @@ impl TcpClient {
         // Handshake succeeded
         stream.set_read_timeout(None).unwrap();
         stream.set_write_timeout(None).unwrap();
-        println!("TCP Client connected & authenticated");
+        log::info!("TCP Client connected & authenticated");
 
         // Send screen metrics
         let screen = crate::hardware::get_screeninfo();
@@ -337,15 +342,18 @@ impl TcpClient {
                 match true_recv(&mut s, &key_arc) {
                     Ok(payload_bytes) => {
                         if payload_bytes.is_empty() {
+                            log::debug!("TCP Client: Received empty payload (EOF) from server");
                             break;
                         }
+                        log::debug!("TCP Client: Received clipboard payload bytes from server");
                         if let Ok(payload) =
                             serde_json::from_slice::<ClipboardPayload>(&payload_bytes)
                         {
                             on_clipboard_recv(payload);
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        log::debug!("TCP Client: Read error: {:?}", e);
                         break;
                     }
                 }
@@ -370,6 +378,7 @@ impl TcpClient {
         payload: &ClipboardPayload,
         settings: &SettingsData,
     ) -> std::io::Result<()> {
+        log::debug!("TCP Client: Sending clipboard payload to server");
         let mut s_lock = self.stream.lock().unwrap();
         if let Some(ref mut s) = *s_lock {
             let payload_bytes = serde_json::to_vec(payload).unwrap();
@@ -380,6 +389,7 @@ impl TcpClient {
     }
 
     pub fn stop(&self) {
+        log::info!("Stopping TCP Client");
         let mut r = self.running.lock().unwrap();
         *r = false;
         let mut s_lock = self.stream.lock().unwrap();

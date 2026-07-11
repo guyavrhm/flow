@@ -25,6 +25,7 @@ impl UdpServer {
         client_ip: &str,
         settings: &SettingsData,
     ) -> std::io::Result<std::net::SocketAddr> {
+        log::debug!("UDP Server: Listening for handshake from {}", client_ip);
         self.socket.set_read_timeout(Some(Duration::from_secs(3)))?;
         let key = CryptoKey::new(&settings.password);
 
@@ -38,7 +39,7 @@ impl UdpServer {
                         let decrypted = key.decrypt(&buf[..len]);
                         if decrypted == b"." {
                             self.socket.set_read_timeout(None)?;
-                            println!("UDP Handshake: Succeeded for client endpoint: {}", addr);
+                            log::info!("UDP Handshake: Succeeded for client endpoint: {}", addr);
                             return Ok(addr);
                         }
                     }
@@ -66,6 +67,7 @@ impl UdpServer {
         dest: std::net::SocketAddr,
         settings: &SettingsData,
     ) -> std::io::Result<()> {
+        log::trace!("UDP Server: Sending event {:?} to {}", event, dest);
         let payload = format_event(event);
         let key = CryptoKey::new(&settings.password);
         let encrypted = key.encrypt(payload.as_bytes());
@@ -88,6 +90,7 @@ impl UdpClient {
     }
 
     pub fn start(&self, server_ip: &str, settings: SettingsData) -> std::io::Result<()> {
+        log::info!("UDP Client connecting to {}...", server_ip);
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
 
@@ -98,7 +101,7 @@ impl UdpClient {
 
         // Send handshake packet
         socket.send_to(&encrypted, &server_dest)?;
-        println!("UDP Client sent handshake to {}", server_dest);
+        log::info!("UDP Client sent handshake to {}", server_dest);
 
         {
             let mut s = self.socket.lock().unwrap();
@@ -133,6 +136,7 @@ impl UdpClient {
                         let decrypted = key.decrypt(&buf[..len]);
                         if let Ok(dec_str) = std::str::from_utf8(&decrypted) {
                             if let Some(event) = parse_event(dec_str) {
+                                log::trace!("UDP Client: Received event {:?}", event);
                                 match event {
                                     InputEvent::Move { x, y } => {
                                         mouse.set_position((x, y));
@@ -155,9 +159,11 @@ impl UdpClient {
                                         }
                                     }
                                     InputEvent::Stop => {
-                                        println!("UDP Client: Received stop command from server");
+                                        log::info!("UDP Client: Received stop command from server");
                                     }
                                 }
+                            } else {
+                                log::warn!("UDP Client: Received unparseable payload: {}", dec_str);
                             }
                         }
                     }
@@ -178,6 +184,7 @@ impl UdpClient {
     }
 
     pub fn stop(&self) {
+        log::info!("Stopping UDP Client");
         let mut r = self.running.lock().unwrap();
         *r = false;
         let mut s = self.socket.lock().unwrap();

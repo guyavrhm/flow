@@ -6,6 +6,8 @@ pub mod engine;
 pub mod hardware;
 pub mod network;
 pub mod ui;
+pub mod logger;
+pub mod paths;
  
 #[cfg(all(test, target_os = "macos"))]
 pub mod mac_tests;
@@ -21,24 +23,30 @@ use crate::hardware::init_keyboard_layout;
 use std::sync::Arc;
 
 fn main() {
+    if let Ok(log_path) = logger::setup_logging() {
+        log::info!("Logging initialized successfully. Logs written to {:?}", log_path);
+    } else {
+        eprintln!("Failed to initialize logging.");
+    }
+
     // Initialize platform keyboard layout cache on the main thread
     init_keyboard_layout();
 
-    // 1. Initialize SQLite Database
+    // Initialize SQLite Database
     if let Err(e) = initialize_db() {
-        eprintln!("Failed to initialize database: {:?}", e);
+        log::error!("Failed to initialize database: {:?}", e);
         std::process::exit(1);
     }
 
     #[cfg(target_os = "linux")]
     {
         if let Err(e) = gtk::init() {
-            eprintln!("Failed to initialize GTK: {:?}", e);
+            log::error!("Failed to initialize GTK: {:?}", e);
         }
     }
 
 
-    // 2. Configure Eframe UI options
+    // Configure Eframe UI options
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("flow")
@@ -47,7 +55,7 @@ fn main() {
         ..Default::default()
     };
 
-    // 3. Start egui run loop, initializing resources within winit's context
+    // Start egui run loop, initializing resources within winit's context
     if let Err(e) = eframe::run_native(
         "flow",
         options,
@@ -62,6 +70,6 @@ fn main() {
             Box::new(FlowApp::new(cc, engine, tray))
         }),
     ) {
-        eprintln!("Failed to run egui application: {:?}", e);
+        log::error!("Failed to run egui application: {:?}", e);
     }
 }

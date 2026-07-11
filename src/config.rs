@@ -1,6 +1,6 @@
 use rusqlite::{Connection, Result, params};
 use std::fs;
-use std::path::PathBuf;
+use crate::paths::get_db_path;
 
 pub const PC_SERVER: i32 = 1;
 pub const PC_CLIENT: i32 = 0;
@@ -24,37 +24,11 @@ pub struct ScreenAttachments {
     pub left: Option<String>,
 }
 
-pub fn get_app_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            PathBuf::from(appdata).join("flow")
-        } else {
-            directories::UserDirs::new()
-                .map(|u| u.home_dir().join(".flow"))
-                .unwrap_or_else(|| PathBuf::from(".flow"))
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(home) = directories::UserDirs::new() {
-            home.home_dir().join(".flow")
-        } else {
-            PathBuf::from(".flow")
-        }
-    }
-}
-
-pub fn get_db_path() -> PathBuf {
-    get_app_dir().join("flow.db")
-}
-
 pub fn initialize_db() -> Result<()> {
-    let app_dir = get_app_dir();
-    if !app_dir.exists() {
-        let _ = fs::create_dir_all(&app_dir);
-    }
     let db_path = get_db_path();
+    if let Some(parent) = db_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let conn = Connection::open(&db_path)?;
 
     // Create settings table

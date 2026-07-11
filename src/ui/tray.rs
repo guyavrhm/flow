@@ -64,13 +64,22 @@ impl SystemTrayManager {
 
 fn load_icon_rgba(name: &str) -> Icon {
     let path = get_resource_path(name);
-    if let Ok(image) = image::open(&path) {
-        let rgba = image.to_rgba8();
-        let (width, height) = rgba.dimensions();
-        if let Ok(icon) = Icon::from_rgba(rgba.into_raw(), width, height) {
-            return icon;
+    match image::open(&path) {
+        Ok(image) => {
+            let rgba = image.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            match Icon::from_rgba(rgba.into_raw(), width, height) {
+                Ok(icon) => return icon,
+                Err(e) => {
+                    log::error!("Tray: Failed to parse icon from RGBA bytes for {}: {:?}", name, e);
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Tray: Failed to open icon image at {:?}: {:?}", path, e);
         }
     }
     // Minimal transparent fallback icon
+    log::warn!("Tray: Using transparent fallback icon for {}", name);
     Icon::from_rgba(vec![0u8; 16], 2, 2).unwrap()
 }
