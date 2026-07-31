@@ -9,10 +9,16 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct UdpServer {
-    socket: Arc<UdpSocket>,
+    pub(crate) socket: Arc<UdpSocket>,
 }
 
 impl UdpServer {
+    pub fn from_socket(socket: UdpSocket) -> Self {
+        Self {
+            socket: Arc::new(socket),
+        }
+    }
+
     pub fn new() -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:8118")?;
         Ok(Self {
@@ -192,7 +198,7 @@ impl UdpClient {
     }
 }
 
-pub(crate) fn format_event(event: &InputEvent) -> String {
+pub fn format_event(event: &InputEvent) -> String {
     match event {
         InputEvent::Move { x, y } => format!("mov {} {}", x, y),
         InputEvent::MouseScroll { dx, dy } => format!("scrl {} {}", dx, dy),
@@ -202,7 +208,7 @@ pub(crate) fn format_event(event: &InputEvent) -> String {
     }
 }
 
-pub(crate) fn parse_event(s: &str) -> Option<InputEvent> {
+pub fn parse_event(s: &str) -> Option<InputEvent> {
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.is_empty() {
         return None;

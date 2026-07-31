@@ -529,14 +529,14 @@ impl MouseController {
 
 // --- MouseListener ---
 
-pub(crate) struct MouseListenerCallbacks {
-    pub(crate) on_move: Box<dyn Fn(i32, i32) + Send>,
-    pub(crate) on_click: Box<dyn Fn(i32, i32, String, bool) + Send>,
-    pub(crate) on_scroll: Box<dyn Fn(i32, i32, i32, i32) + Send>,
-    pub(crate) suppress: bool,
-    pub(crate) x_center: i32,
-    pub(crate) y_center: i32,
-    pub(crate) has_move: bool,
+pub struct MouseListenerCallbacks {
+    pub on_move: Box<dyn Fn(i32, i32) + Send>,
+    pub on_click: Box<dyn Fn(i32, i32, String, bool) + Send>,
+    pub on_scroll: Box<dyn Fn(i32, i32, i32, i32) + Send>,
+    pub suppress: bool,
+    pub x_center: i32,
+    pub y_center: i32,
+    pub has_move: bool,
 }
 
 pub struct MouseListener {
@@ -678,7 +678,7 @@ impl Drop for MouseListener {
     }
 }
 
-pub(crate) extern "C" fn mouse_tap_callback(
+pub extern "C" fn mouse_tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
     event: CGEventRef,
@@ -787,10 +787,10 @@ impl KeyboardController {
 
 // --- KeyboardListener ---
 
-pub(crate) struct KeyboardListenerCallbacks {
-    pub(crate) on_press: Box<dyn Fn(String) + Send>,
-    pub(crate) on_release: Box<dyn Fn(String) + Send>,
-    pub(crate) suppress: bool,
+pub struct KeyboardListenerCallbacks {
+    pub on_press: Box<dyn Fn(String) + Send>,
+    pub on_release: Box<dyn Fn(String) + Send>,
+    pub suppress: bool,
 }
 
 pub struct KeyboardListener {
@@ -898,7 +898,7 @@ impl Drop for KeyboardListener {
     }
 }
 
-pub(crate) extern "C" fn keyboard_tap_callback(
+pub extern "C" fn keyboard_tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
     event: CGEventRef,

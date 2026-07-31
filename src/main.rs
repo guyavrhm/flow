@@ -1,29 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-pub mod config;
-pub mod crypto;
-pub mod engine;
-pub mod hardware;
-pub mod network;
-pub mod ui;
-pub mod logger;
-pub mod paths;
- 
-#[cfg(all(test, target_os = "macos"))]
-pub mod mac_tests;
-
-#[cfg(all(test, target_os = "linux"))]
-pub mod linux_tests;
-
-use crate::config::initialize_db;
-use crate::engine::AppEngine;
-use crate::ui::FlowApp;
-use crate::ui::tray::SystemTrayManager;
-use crate::hardware::init_keyboard_layout;
+use flow::config::initialize_db;
+use flow::engine::AppEngine;
+use flow::ui::FlowApp;
+use flow::ui::tray::SystemTrayManager;
+use flow::hardware::init_keyboard_layout;
 use std::sync::Arc;
 
 fn main() {
-    if let Ok(log_path) = logger::setup_logging() {
+    if let Ok(log_path) = flow::logger::setup_logging() {
         log::info!("Logging initialized successfully. Logs written to {:?}", log_path);
     } else {
         eprintln!("Failed to initialize logging.");

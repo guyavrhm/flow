@@ -7,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 pub struct TcpServer {
-    running: Arc<Mutex<bool>>,
-    clients: Arc<Mutex<Vec<Arc<Mutex<TcpClientInfo>>>>>,
+    pub(crate) running: Arc<Mutex<bool>>,
+    pub clients: Arc<Mutex<Vec<Arc<Mutex<TcpClientInfo>>>>>,
 }
 
 pub struct TcpClientInfo {

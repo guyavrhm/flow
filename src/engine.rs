@@ -723,7 +723,7 @@ impl AppEngine {
     }
 }
 
-pub(crate) fn handle_client_edge_transition(
+pub fn handle_client_edge_transition(
     target: &str,
     side: i32, // 0=left, 1=right, 2=top, 3=bottom
     client_width: i32,

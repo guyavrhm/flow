@@ -88,7 +88,53 @@ sequenceDiagram
 
 ---
 
-## 4. Threading & Concurrency Model
+## 4. Communication Protocol
+
+`flow` encrypts all communications (both TCP and UDP) using AES-128-ECB, with the key derived from the user-configured password (see [src/crypto.rs](file:///Users/guyavraham/flow/src/crypto.rs)).
+
+### 4.1 TCP Control Channel (Port 8118)
+
+TCP is used for connection establishment, capability exchange, and clipboard synchronization.
+
+#### TCP Frame Format (Encryption Envelope)
+Each TCP message is transmitted as an encrypted payload prefixed with a fixed-size length header:
+* **Length Header**: 10-byte ASCII, zero-padded integer representing the length of the encrypted ciphertext (e.g., `0000000016`).
+* **Encrypted Payload**: The ciphertext encrypted via AES-128-ECB.
+
+#### Connection & Handshake Flow
+1. **TCP Handshake**:
+   * The client connects to the server's TCP port `8118`.
+   * The client sends a frame containing a single byte `.` encrypted.
+   * The server decrypts it, validates the `.` payload, and responds with a single byte `.` encrypted.
+   * If validation succeeds on both sides, the handshake is completed.
+2. **Screen Metrics Exchange**:
+   * Right after the handshake, the client sends its screen dimensions serialized as JSON in `ScreenMetrics` format (e.g., `{"width": 1920, "height": 1080}`).
+3. **Control & Clipboard Channel**:
+   * The connection remains open. When a clipboard change is detected on either client or server, a `ClipboardPayload` is serialized to JSON, encrypted, and transmitted.
+
+### 4.2 UDP Input Channel (Port 8118)
+
+UDP is used for low-latency transmission of high-frequency input events (mouse move, clicks, scroll, and keystrokes).
+
+#### UDP Handshake
+To bind client/server UDP sockets:
+* The client sends a UDP packet containing a single byte `.` encrypted via AES-128-ECB to the server's port `8118`.
+* The server decrypts and verifies the packet to register the client's public UDP socket endpoint (`SocketAddr`).
+
+#### Input Event Payload Format
+All input events are sent as encrypted raw strings. Once decrypted, the payload follows a space-delimited text protocol:
+
+| Format / Event | Description | Example |
+|---|---|---|
+| `mov <x> <y>` | Warps mouse to coordinates `x`, `y` | `mov 1280 720` |
+| `scrl <dx> <dy>` | Simulates mouse scroll wheel offsets | `scrl 0 -120` |
+| `prsm <pressed> <button>` | Simulates mouse click event (`pressed` is `true`/`false`, `button` is e.g. `Left`, `Right`) | `prsm true Left` |
+| `prsk <pressed> <key>` | Simulates key press/release (`pressed` is `true`/`false`, `key` is key string identifier) | `prsk false Shift` |
+| `stp` | Directs the client to stop capturing inputs and returns focus to the server | `stp` |
+
+---
+
+## 5. Threading & Concurrency Model
 
 `flow` leverages native OS multi-threading for zero-latency execution. Below is a detailed breakdown of all active threads running in both Server and Client modes:
 
@@ -129,7 +175,7 @@ State variables are synchronized across thread boundaries using lock-protected r
 
 ---
 
-## 5. OS-Specific FFI & Hardware Integration
+## 6. OS-Specific FFI & Hardware Integration
 
 `flow` uses the src/hardware module as an abstraction layer to standardize cross-platform hardware events and OS windowing hooks (e.g., Win32, Cocoa/Quartz, X11).
 
