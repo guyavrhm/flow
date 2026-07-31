@@ -121,7 +121,11 @@ To demarcate JSON payloads sent over the stream, each message is transmitted wit
 3. **Screen Metrics Exchange**:
    - The client responds by sending its screen dimensions serialized as JSON in `ScreenMetrics` format.
 4. **Control & Clipboard Channel**:
-   - When a clipboard change is detected on either client or server, a `ClipboardPayload` is serialized to JSON and transmitted over the TLS stream.
+    - Eager Syncing: For payloads <= 5MB, a `ClipboardPayload::Text` or `ClipboardPayload::Files` is serialized to JSON and transmitted immediately over the TLS stream.
+    - Lazy Syncing (Promises): For payloads > 5MB, the source client/server registers the content locally and broadcasts a `ClipboardPayload::Offer` containing a unique ID, total size, and format.
+    - When the user triggers a paste on the destination client, the OS pasteboard requests the promised data. The destination client sends a `ClipboardPayload::Request` back to the source.
+    - The source client then streams the payload over TLS in sequential `ClipboardPayload::Chunk` blocks of 64KB, which are accumulated in memory on the destination client and written to the pasteboard upon completion. Intermediate forwarding nodes do not accumulate these chunks to save memory and avoid UI progress indicators.
+    - Loopback Prevention: To prevent infinite clipboard sync feedback loops, all network-received updates are hashed and ignored when the local OS clipboard listener detects the change. Both eager writes (text/files) and lazy promise completions (fulfilled on-demand via native FFI) are registered in the hardware module's unified global `CLIPBOARD_IGNORE_HASHES` queue. Additionally, a global `IN_SET_CLIPBOARD` guard is set during eager sync updates to temporarily pause the clipboard change listener and eliminate race conditions.
 5. **Connection Persistence & Reconnection Loop**:
    - The client runs a background connection loop (using cooperative 200ms checks) that automatically retries the TCP/TLS connection every 2 seconds if disconnected.
    - To prevent clean-up race conditions when a client disconnects and quickly reconnects, the server generates a unique ephemeral random `connection_id` (`u64`) for each session. During cleanup, the server checks this ID to ensure it only terminates the exact defunct connection instance, and uses pointer comparison (`Arc::ptr_eq`) to preserve active sessions.
@@ -166,7 +170,7 @@ Once decrypted, the payload follows a space-delimited text protocol:
 | **Client TCP Connections (1 per client)** | tcp.rs | Runs a blocking loop listening for incoming TCP payloads (handshake validation, screen metrics, and clipboard payloads) from a specific client. | Lifetime of client connection |
 | **UDP Handshake Thread (1 per client)** | engine.rs | Created temporarily to wait for the client's UDP handshake packet to extract and store their remote UDP port, then terminates. | Transient (less than 3 seconds) |
 | **Edge Tracking Thread** | engine.rs | Runs a 10ms loop checking local mouse boundaries. When control shifts, it activates blocking system-level input hooks (listening for mouse/keyboard inputs) and packages them to UDP. | Active while Server is running |
-| **Clipboard Monitor Thread** | engine.rs | Runs a 1-second loop polling the local OS clipboard and broadcasts changes to clients via TCP. | Active while Server is running |
+| **Clipboard Listener Thread** | mac.rs / win.rs / linux.rs | Detects local pasteboard updates natively (e.g. 250ms `changeCount` polling on macOS, window message loops or signals on Windows/Linux) and notifies the engine. | Active while Server is running |
 | **Engine Reload Thread** | mod.rs | Spawned briefly when the user hits "Save" to stop the engine and re-initialize socket bindings without freezing the UI thread. | Transient |
 
 ### Client Mode Threads (Guest)
@@ -176,7 +180,7 @@ Once decrypted, the payload follows a space-delimited text protocol:
 | **Main Thread (UI)** | System | Runs the `egui` interface and tray indicators. | Application lifetime |
 | **TCP Client Thread** | engine.rs | Runs a periodic reconnection loop that attempts to connect to the server's TCP socket every 2 seconds when disconnected, and runs a persistent blocking loop to receive incoming server clipboard packets once connected. | Active while Client is running |
 | **UDP Client Thread** | udp.rs | Listens on a UDP socket for real-time input events (`Move`, `KeyPress`, `Stop`), decrypts them, and immediately simulates them on the local OS. | Active while Client is connected |
-| **Clipboard Monitor Thread** | engine.rs | Runs a 1-second loop polling the local OS clipboard and sends changes to the server via TCP. | Active while Client is running |
+| **Clipboard Listener Thread** | mac.rs / win.rs / linux.rs | Detects local pasteboard updates natively and notifies the engine. | Active while Client is running |
 
 ### Thread Communication & Shared Data
 
@@ -190,7 +194,8 @@ State variables are synchronized across thread boundaries using lock-protected r
 | **`current_controlled`** | `Arc<Mutex<String>>` | Edge Tracker | OS Input Hooks | Tracks which screen holds input focus (`"main"` or client IP). |
 | **`is_connected`** | `Arc<Mutex<bool>>` | TCP threads | Main UI Thread | Drives visual tray connection status indicators ($V$ / $X$). |
 | **`udp_server`** | `Arc<Mutex<Option<UdpServer>>>` | Main UI Thread | Edge Tracker | Stores the server's UDP socket reference to send input event packets. |
-| **`clipboard_history`** | `Arc<Mutex<Vec<String>>>` | Clipboard & TCP threads | Clipboard & TCP threads | Stores recent clipboard content hashes to prevent network loopbacks. |
+| **`CLIPBOARD_IGNORE_HASHES`** | `Lazy<Mutex<Vec<u64>>>` | TCP connection threads & FFI promise threads | Clipboard listener (`on_change` in engine.rs) | Stores hashes of recent network-received clipboard contents (both eager and lazy updates) to prevent network loopbacks. |
+| **`IN_SET_CLIPBOARD`** | `AtomicBool` | TCP connection threads | Clipboard listener | Guard variable set during eager sync updates to temporarily pause the clipboard change listener and prevent race condition loopbacks. |
 
 ---
 
@@ -210,7 +215,7 @@ Manages reading from and writing to the OS clipboard.
 pub struct Clipboard;
 
 impl Clipboard {
-    // Polls current clipboard contents and returns it as a string
+    // Queries current clipboard contents and returns it as a string
     pub fn data() -> String;
 
     // Sets the clipboard text content
@@ -218,6 +223,42 @@ impl Clipboard {
 
     // Sets the clipboard copied files content using absolute file paths
     pub fn set_files(paths: Vec<String>);
+}
+```
+
+#### 3. Promised Clipboard Struct
+Manages delayed rendering and streaming transfer of large clipboard payloads over the network.
+```rust
+pub struct PromisedClipboard;
+
+impl PromisedClipboard {
+    // Registers a lazy promise owner for delayed rendering of large payloads
+    pub fn set_promise(id: &str, format: &str, size: usize);
+
+    // Feeds an incoming network chunk of streaming payload to the active promise
+    pub fn write_chunk(id: &str, chunk: Vec<u8>, is_last: bool);
+
+    // Registers a clean callback closure for FFI-to-engine request notification
+    pub fn on_request<F>(callback: F) where F: Fn(String) + Send + Sync + 'static;
+}
+```
+
+#### 4. Clipboard Listener Struct
+Platform-native listener abstraction to detect local clipboard updates without polling in cross-platform engine code.
+```rust
+pub struct ClipboardListener;
+
+impl ClipboardListener {
+    // Instantiates a new listener with a change handler callback
+    pub fn new<F>(on_change: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static;
+
+    // Starts listening for clipboard change events
+    pub fn start(&self);
+
+    // Stops listening and joins any background worker threads
+    pub fn stop(&self);
 }
 ```
 
@@ -303,8 +344,9 @@ impl MouseListener {
 To support a new operating system or windowing system, implement a new backend module using these steps:
 
 1. Create the source file under the hardware directory: `src/hardware/<your_os>.rs`.
-2. Implement all structures and functions detailed above inside your new `src/hardware/<your_os>.rs` file.
-3. Expose the new module in `src/hardware/mod.rs` using conditional compilation attributes:
+2. Implement all structures and functions detailed above (e.g. `Clipboard`, `ClipboardListener`, controllers, etc.) inside your new `src/hardware/<your_os>.rs` file.
+3. Implement `pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize)` within your new file to handle registering the platform-specific lazy promise owner.
+4. Expose the new module in `src/hardware/mod.rs` using conditional compilation attributes:
 
 ```rust
 #[cfg(target_os = "<your_os>")]
@@ -313,5 +355,5 @@ pub mod <your_os>;
 #[cfg(target_os = "<your_os>")]
 pub use <your_os>::{
     Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout,
+    init_keyboard_layout, ClipboardListener,
 };

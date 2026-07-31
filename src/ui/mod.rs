@@ -24,6 +24,7 @@ pub struct FlowApp {
     status_msg: String,
     local_fingerprint: String,
     initial_hide_done: bool,
+    was_hidden_for_transfer: bool,
 }
 
 impl FlowApp {
@@ -69,6 +70,7 @@ impl FlowApp {
             status_msg: "".to_string(),
             local_fingerprint,
             initial_hide_done: false,
+            was_hidden_for_transfer: false,
         }
     }
 
@@ -138,6 +140,37 @@ impl eframe::App for FlowApp {
             self.tray.set_connected();
         } else {
             self.tray.set_disconnected();
+        }
+
+        let progress = crate::hardware::CLIPBOARD_SYNC_PROGRESS.load(std::sync::atomic::Ordering::Relaxed);
+        if progress > 0 {
+            if !self.show_window {
+                self.show_window = true;
+                self.was_hidden_for_transfer = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+
+            // Draw a modal progress overlay
+            egui::Window::new("Clipboard Sync")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .movable(false)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label("Syncing large clipboard payload from network...");
+                        ui.add_space(5.0);
+                        if progress == 1 {
+                            ui.add(egui::ProgressBar::new(0.0).show_percentage());
+                        } else {
+                            ui.add(egui::ProgressBar::new(progress as f32 / 100.0).show_percentage());
+                        }
+                    });
+                });
+        } else if self.was_hidden_for_transfer {
+            self.show_window = false;
+            self.was_hidden_for_transfer = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
         if !self.show_window {

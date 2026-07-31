@@ -6,12 +6,16 @@ use flow::network::udp::{format_event, parse_event};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
-use std::net::TcpListener;
 
 static DB_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CLIPBOARD_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_db_lock() -> &'static Mutex<()> {
     DB_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn get_clipboard_lock() -> &'static Mutex<()> {
+    CLIPBOARD_TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 // ==========================================
@@ -253,6 +257,7 @@ mod macos_tests {
 
     #[test]
     fn test_mac_clipboard_combined() {
+        let _lock = get_clipboard_lock().lock().unwrap_or_else(|e| e.into_inner());
         let original_clipboard = Clipboard::data();
 
         let test_str = "flow-system-test-unique-string-123456";
@@ -288,6 +293,57 @@ mod macos_tests {
 
         assert!(contains_file1, "Clipboard did not contain file 1");
         assert!(contains_file2, "Clipboard did not contain file 2");
+    }
+
+    #[test]
+    fn test_mac_clipboard_promise_flow() {
+        let _lock = get_clipboard_lock().lock().unwrap_or_else(|e| e.into_inner());
+        use std::sync::mpsc::channel;
+        use flow::hardware::PromisedClipboard;
+        
+        let original_clipboard = Clipboard::data();
+        
+        // 1. Initialize promise request receiver via callback
+        let (req_tx, req_rx) = channel();
+        PromisedClipboard::on_request(move |uuid| {
+            let _ = req_tx.send(uuid);
+        });
+        
+        // 2. Set the promise
+        let test_promise_id = "test-promise-999";
+        let test_text = "secret promised data payload!";
+        PromisedClipboard::set_promise(test_promise_id, "text", test_text.len());
+        
+        // 3. Spawn a background thread to respond to the promise request
+        let response_thread = thread::spawn(move || {
+            // Wait for the request
+            let requested_id = req_rx.recv_timeout(Duration::from_secs(5))
+                .expect("Failed to receive promised request");
+            assert_eq!(requested_id, test_promise_id);
+            
+            // Fulfill the promise directly
+            PromisedClipboard::fulfill_promise(test_promise_id, flow::hardware::FulfillmentPayload::Text(test_text.to_string()));
+        });
+        
+        // 4. Request the clipboard data. This blocks and triggers the promise resolution!
+        let read_back = Clipboard::data();
+        
+        // Wait for helper thread to finish
+        response_thread.join().unwrap();
+
+        // Note: We don't assert flow::hardware::CLIPBOARD_IGNORE_HASHES contents here because 
+        // other integration tests running concurrently start clipboard listeners that may 
+        // immediately consume and remove the hash from the ignore queue.
+
+
+        // Restore original clipboard
+        Clipboard::set_text(&original_clipboard);
+        
+        // Clear promise callback to leave a clean state
+        PromisedClipboard::on_request(|_| {});
+
+        // Assert that the read_back data matches the streamed promised data!
+        assert_eq!(read_back, test_text);
     }
 
     #[test]
@@ -454,6 +510,7 @@ mod linux_tests {
 
     #[test]
     fn test_linux_clipboard_combined() {
+        let _lock = get_clipboard_lock().lock().unwrap_or_else(|e| e.into_inner());
         let original_clipboard = Clipboard::data();
 
         let test_str = "flow-system-test-unique-string-123456";
@@ -526,9 +583,10 @@ mod linux_tests {
 
 #[test]
 fn test_client_reconnection_flow() {
-    let _lock = get_db_lock().lock().unwrap();
+    let _lock = get_db_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _clip_lock = get_clipboard_lock().lock().unwrap_or_else(|e| e.into_inner());
     use flow::engine::AppEngine;
-    use flow::config::{initialize_db, SettingsData};
+    use flow::config::initialize_db;
     use flow::paths::get_db_path;
     use std::fs;
 

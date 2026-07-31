@@ -2,6 +2,23 @@ use crate::config::{ScreenAttachments, SettingsData, get_attachments, get_settin
 use crate::hardware::{
     Clipboard, KeyboardListener, MouseController, MouseListener, get_screeninfo,
 };
+use once_cell::sync::Lazy;
+
+pub struct OfferedData {
+    pub id: String,
+    pub format: String,
+    pub data: String,
+}
+
+pub static ACTIVE_OFFERED_DATA: Lazy<Mutex<Option<OfferedData>>> = Lazy::new(|| Mutex::new(None));
+
+pub struct ClipboardAccumulator {
+    pub id: String,
+    pub format: String,
+    pub size: usize,
+    pub buffer: Vec<u8>,
+}
+
 use crate::network::protocol::{ClipboardPayload, InputEvent, ScreenMetrics};
 use crate::network::tcp::{TcpClient, TcpServer};
 use crate::network::udp::{UdpClient, UdpServer};
@@ -41,8 +58,8 @@ pub struct AppEngine {
     tcp_client: Arc<TcpClient>,
     udp_client: Arc<UdpClient>,
 
-    // Clipboard loop history to prevent feedback loops
-    clipboard_history: Arc<Mutex<Vec<String>>>,
+    clipboard_listener: Arc<Mutex<Option<crate::hardware::ClipboardListener>>>,
+    clipboard_accumulator: Arc<Mutex<Option<ClipboardAccumulator>>>,
 
     // Status signals for UI
     pub is_connected: Arc<Mutex<bool>>,
@@ -67,7 +84,8 @@ impl AppEngine {
             keyboard_listener: Arc::new(Mutex::new(None)),
             tcp_client: Arc::new(TcpClient::new()),
             udp_client: Arc::new(UdpClient::new()),
-            clipboard_history: Arc::new(Mutex::new(Vec::new())),
+            clipboard_listener: Arc::new(Mutex::new(None)),
+            clipboard_accumulator: Arc::new(Mutex::new(None)),
             is_connected: Arc::new(Mutex::new(false)),
             pending_trusts: Arc::new(Mutex::new(Vec::new())),
         }
@@ -86,6 +104,21 @@ impl AppEngine {
         };
 
         log::info!("Starting AppEngine (mode: {})", if settings.pc == 1 { "Server" } else { "Client" });
+
+        // Initialize promised clipboard request callback
+        let tcp_server = self.tcp_server.clone();
+        let tcp_client = self.tcp_client.clone();
+        let settings_clone = settings.clone();
+
+        crate::hardware::PromisedClipboard::on_request(move |uuid| {
+            log::info!("Promise callback: Clipboard requested payload {}, sending Request", uuid);
+            let payload = ClipboardPayload::Request { id: uuid };
+            if settings_clone.pc == 1 {
+                tcp_server.broadcast_clipboard(&payload, None);
+            } else {
+                let _ = tcp_client.send_clipboard(&payload);
+            }
+        });
 
         if settings.pc == 1 {
             // Start Server Mode
@@ -120,6 +153,12 @@ impl AppEngine {
         {
             let mut kl = self.keyboard_listener.lock().unwrap();
             *kl = None;
+        }
+        {
+            let mut cl = self.clipboard_listener.lock().unwrap();
+            if let Some(listener) = cl.take() {
+                listener.stop();
+            }
         }
 
         let mut conn = self.is_connected.lock().unwrap();
@@ -215,6 +254,7 @@ impl AppEngine {
         let current_controlled_disc = current_controlled.clone();
         let mouse_listener_disc = self.mouse_listener.clone();
         let keyboard_listener_disc = self.keyboard_listener.clone();
+        let clipboard_accumulator_disc = self.clipboard_accumulator.clone();
 
         let on_disconnect = move |ip: String, conn_id: u64| {
             log::info!("Server: Client disconnected: {} (conn_id: {})", ip, conn_id);
@@ -243,27 +283,35 @@ impl AppEngine {
                     let mut kl = keyboard_listener_disc.lock().unwrap();
                     *kl = None;
                 }
+
+                // Clean up progress bar & accumulator
+                crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
+                *clipboard_accumulator_disc.lock().unwrap() = None;
             } else {
                 log::info!("Server: Ignoring disconnect for {} as a newer connection exists", ip);
             }
         };
 
-        let clipboard_history = self.clipboard_history.clone();
         let tcp_server_clip = self.tcp_server.clone();
+        let clipboard_accumulator_server = self.clipboard_accumulator.clone();
 
         let on_clipboard_recv = move |payload: ClipboardPayload, from_ip: String| {
             let data_repr = match &payload {
                 ClipboardPayload::Text { text } => text.clone(),
                 ClipboardPayload::Files { files } => format!("files:{}", files.len()),
+                ClipboardPayload::Offer { id, size, format } => format!("offer:{}:{}:{}", id, size, format),
+                ClipboardPayload::Request { id } => format!("request:{}", id),
+                ClipboardPayload::Chunk { id, chunk_index, is_last, data } => format!("chunk:{}:{}:{}:{}", id, chunk_index, is_last, data.len()),
             };
             log::info!("Server: Received clipboard update from client {}: {}", from_ip, data_repr);
 
-            {
-                let mut history = clipboard_history.lock().unwrap();
-                history.push(data_repr.clone());
-                if history.len() > 5 {
-                    history.remove(0);
-                }
+            let is_set_payload = match &payload {
+                ClipboardPayload::Text { .. } | ClipboardPayload::Files { .. } => true,
+                _ => false,
+            };
+
+            if is_set_payload {
+                crate::hardware::IN_SET_CLIPBOARD.store(true, std::sync::atomic::Ordering::Relaxed);
             }
 
             match &payload {
@@ -271,13 +319,47 @@ impl AppEngine {
                     Clipboard::set_text(text);
                 }
                 ClipboardPayload::Files { files } => {
-                    let local_paths = write_clipboard_files(files);
+                    let local_paths = crate::network::protocol::write_clipboard_files(files);
                     Clipboard::set_files(local_paths);
+                }
+                ClipboardPayload::Offer { id, size, format } => {
+                    crate::hardware::PromisedClipboard::set_promise(id, format, *size);
+                }
+                ClipboardPayload::Request { id } => {
+                    // Forward request to other clients
+                    tcp_server_clip.broadcast_clipboard(&payload, Some(&from_ip));
+                    
+                    // Check if Server owns it
+                    if let Some(active_offered) = ACTIVE_OFFERED_DATA.lock().unwrap().as_ref() {
+                        if &active_offered.id == id {
+                            let offered_data = active_offered.data.clone();
+                            let format = active_offered.format.clone();
+                            let id = id.clone();
+                            let tcp_server_stream = tcp_server_clip.clone();
+                            thread::spawn(move || {
+                                stream_offered_data(&id, &format, &offered_data, move |chunk_payload| {
+                                    tcp_server_stream.broadcast_clipboard(&chunk_payload, None);
+                                });
+                            });
+                        }
+                    }
+                }
+                ClipboardPayload::Chunk { id, chunk_index: _, is_last, data } => {
+                    // Forward chunk to other clients
+                    tcp_server_clip.broadcast_clipboard(&payload, Some(&from_ip));
+                    
+                    // Check if Server needs it
+                    handle_incoming_clipboard_chunk(id, *is_last, data, &clipboard_accumulator_server);
                 }
             }
 
-            // Broadcast to other clients
-            tcp_server_clip.broadcast_clipboard(&payload, Some(&from_ip));
+            if is_set_payload {
+                let read_back = Clipboard::data();
+                if !read_back.is_empty() && read_back != "unknown format" {
+                    crate::hardware::push_ignore_hash(hash_clipboard_data(&read_back));
+                }
+                crate::hardware::IN_SET_CLIPBOARD.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         };
 
         // Start TCP Server
@@ -291,7 +373,7 @@ impl AppEngine {
 
         // Start Server Core Loops (Edge tracking & Clipboard polling)
         self.spawn_server_edge_tracking();
-        self.spawn_server_clipboard_monitoring();
+        self.start_clipboard_monitoring();
     }
 
     fn spawn_server_edge_tracking(&self) {
@@ -569,49 +651,103 @@ impl AppEngine {
         });
     }
 
-    fn spawn_server_clipboard_monitoring(&self) {
-        let is_running = self.is_running.clone();
-        let clipboard_history = self.clipboard_history.clone();
+    fn start_clipboard_monitoring(&self) {
+        let settings = {
+            let s = self.settings.lock().unwrap();
+            s.clone()
+        };
         let tcp_server = self.tcp_server.clone();
+        let tcp_client = self.tcp_client.clone();
 
-        thread::spawn(move || {
-            let mut recent_value = String::new();
+        let on_change = move || {
+            let data = Clipboard::data();
+            if data.is_empty() || data == "unknown format" {
+                return;
+            }
 
-            while *is_running.lock().unwrap() {
-                thread::sleep(Duration::from_secs(1));
-
-                let data = Clipboard::data();
-                if data.is_empty() || data == "unknown format" {
-                    continue;
-                }
-
-                if data != recent_value {
-                    recent_value = data.clone();
-
-                    let is_from_network = {
-                        let mut history = clipboard_history.lock().unwrap();
-                        let matched = history.contains(&data);
-                        if matched {
-                            history.retain(|h| h != &data);
+            let mut is_files = false;
+            let mut total_size = 0;
+            if data.starts_with("file://") || data.starts_with('/') {
+                is_files = true;
+                for path_str in data.lines() {
+                    let path_str = path_str.trim_start_matches("file://");
+                    let path = std::path::Path::new(path_str);
+                    if path.exists() {
+                        if path.is_file() {
+                            if let Ok(metadata) = std::fs::metadata(path) {
+                                total_size += metadata.len() as usize;
+                            }
+                        } else if path.is_dir() {
+                            for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+                                if entry.path().is_file() {
+                                    if let Ok(metadata) = std::fs::metadata(entry.path()) {
+                                        total_size += metadata.len() as usize;
+                                    }
+                                }
+                            }
                         }
-                        matched
+                    }
+                }
+            } else {
+                total_size = data.len();
+            }
+
+            let data_hash = hash_clipboard_data(&data);
+            let is_from_network = crate::hardware::check_and_consume_ignore_hash(data_hash);
+
+            if !is_from_network {
+                if total_size > 5 * 1024 * 1024 {
+                    let id = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                        .to_string();
+                    let format = if is_files { "files".to_string() } else { "text".to_string() };
+                    log::info!("Clipboard: Local content is large ({} bytes). Registering promise id: {}", total_size, id);
+
+                    {
+                        let mut offered = ACTIVE_OFFERED_DATA.lock().unwrap();
+                        *offered = Some(OfferedData {
+                            id: id.clone(),
+                            format: format.clone(),
+                            data: data.clone(),
+                        });
+                    }
+
+                    let payload = ClipboardPayload::Offer {
+                        id,
+                        size: total_size,
+                        format,
+                    };
+                    if settings.pc == 1 {
+                        tcp_server.broadcast_clipboard(&payload, None);
+                    } else {
+                        let _ = tcp_client.send_clipboard(&payload);
+                    }
+                } else {
+                    log::info!("Clipboard: Local content updated, syncing...");
+                    let payload = if is_files {
+                        format_clipboard_data(&data)
+                    } else {
+                        Some(ClipboardPayload::Text { text: data })
                     };
 
-                    if !is_from_network {
-                        log::info!("Server: Local clipboard updated, broadcasting...");
-                        let payload = if data.starts_with("file://") || data.starts_with('/') {
-                            format_clipboard_data(&data)
-                        } else {
-                            Some(ClipboardPayload::Text { text: data })
-                        };
-
-                        if let Some(p) = payload {
+                    if let Some(p) = payload {
+                        if settings.pc == 1 {
                             tcp_server.broadcast_clipboard(&p, None);
+                        } else {
+                            let _ = tcp_client.send_clipboard(&p);
                         }
                     }
                 }
             }
-        });
+        };
+
+        let listener = crate::hardware::ClipboardListener::new(on_change);
+        listener.start();
+
+        let mut lock = self.clipboard_listener.lock().unwrap();
+        *lock = Some(listener);
     }
 
     fn start_client(&self, settings: SettingsData) {
@@ -620,11 +756,11 @@ impl AppEngine {
         let server_ip = settings.ip.clone();
         let is_connected = self.is_connected.clone();
         let udp_client = self.udp_client.clone();
-        let clipboard_history = self.clipboard_history.clone();
         let tcp_client = self.tcp_client.clone();
         let ip = settings.ip.clone();
         let pending_trusts = self.pending_trusts.clone();
         let is_running_loop = self.is_running.clone();
+        let clipboard_accumulator_client = self.clipboard_accumulator.clone();
 
         thread::spawn(move || {
             while *is_running_loop.lock().unwrap() {
@@ -651,6 +787,7 @@ impl AppEngine {
 
                     let is_connected_disc = is_connected.clone();
                     let udp_client_disc = udp_client.clone();
+                    let clipboard_accumulator_disc = clipboard_accumulator_client.clone();
                     let on_disconnect = move || {
                         log::info!("Client: Disconnected from server");
                         {
@@ -658,29 +795,68 @@ impl AppEngine {
                             *conn = false;
                         }
                         udp_client_disc.stop();
+                        crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
+                        *clipboard_accumulator_disc.lock().unwrap() = None;
                     };
 
-                    let clipboard_history_clip = clipboard_history.clone();
+                    let tcp_client_stream = tcp_client.clone();
+                    let clipboard_accumulator_conn = clipboard_accumulator_client.clone();
                     let on_clipboard_recv = move |payload: ClipboardPayload| {
                         let data_repr = match &payload {
                             ClipboardPayload::Text { text } => text.clone(),
                             ClipboardPayload::Files { files } => format!("files:{}", files.len()),
+                            ClipboardPayload::Offer { id, size, format } => format!("offer:{}:{}:{}", id, size, format),
+                            ClipboardPayload::Request { id } => format!("request:{}", id),
+                            ClipboardPayload::Chunk { id, chunk_index, is_last, data } => format!("chunk:{}:{}:{}:{}", id, chunk_index, is_last, data.len()),
                         };
                         log::info!("Client: Received clipboard update from server: {}", data_repr);
 
-                        {
-                            let mut history = clipboard_history_clip.lock().unwrap();
-                            history.push(data_repr);
+                        let is_set_payload = match &payload {
+                            ClipboardPayload::Text { .. } | ClipboardPayload::Files { .. } => true,
+                            _ => false,
+                        };
+
+                        if is_set_payload {
+                            crate::hardware::IN_SET_CLIPBOARD.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
 
-                        match payload {
+                        match &payload {
                             ClipboardPayload::Text { text } => {
-                                Clipboard::set_text(&text);
+                                Clipboard::set_text(text);
                             }
                             ClipboardPayload::Files { files } => {
-                                let local_paths = write_clipboard_files(&files);
+                                let local_paths = crate::network::protocol::write_clipboard_files(files);
                                 Clipboard::set_files(local_paths);
                             }
+                            ClipboardPayload::Offer { id, size, format } => {
+                                crate::hardware::PromisedClipboard::set_promise(id, format, *size);
+                            }
+                            ClipboardPayload::Request { id } => {
+                                if let Some(active_offered) = ACTIVE_OFFERED_DATA.lock().unwrap().as_ref() {
+                                    if &active_offered.id == id {
+                                        let offered_data = active_offered.data.clone();
+                                        let format = active_offered.format.clone();
+                                        let id = id.clone();
+                                        let tcp_client_stream_thread = tcp_client_stream.clone();
+                                        thread::spawn(move || {
+                                            stream_offered_data(&id, &format, &offered_data, move |chunk_payload| {
+                                                let _ = tcp_client_stream_thread.send_clipboard(&chunk_payload);
+                                            });
+                                        });
+                                    }
+                                }
+                            }
+                            ClipboardPayload::Chunk { id, chunk_index: _, is_last, data } => {
+                                handle_incoming_clipboard_chunk(id, *is_last, data, &clipboard_accumulator_conn);
+                            }
+                        }
+
+                        if is_set_payload {
+                            let read_back = Clipboard::data();
+                            if !read_back.is_empty() && read_back != "unknown format" {
+                                crate::hardware::push_ignore_hash(hash_clipboard_data(&read_back));
+                            }
+                            crate::hardware::IN_SET_CLIPBOARD.store(false, std::sync::atomic::Ordering::Relaxed);
                         }
                     };
 
@@ -706,54 +882,11 @@ impl AppEngine {
             }
         });
 
-        self.spawn_client_clipboard_monitoring();
-    }
-
-    fn spawn_client_clipboard_monitoring(&self) {
-        let is_running = self.is_running.clone();
-        let clipboard_history = self.clipboard_history.clone();
-        let tcp_client = self.tcp_client.clone();
-
-        thread::spawn(move || {
-            let mut recent_value = String::new();
-
-            while *is_running.lock().unwrap() {
-                thread::sleep(Duration::from_secs(1));
-
-                let data = Clipboard::data();
-                if data.is_empty() || data == "unknown format" {
-                    continue;
-                }
-
-                if data != recent_value {
-                    recent_value = data.clone();
-
-                    let is_from_network = {
-                        let mut history = clipboard_history.lock().unwrap();
-                        let matched = history.contains(&data);
-                        if matched {
-                            history.retain(|h| h != &data);
-                        }
-                        matched
-                    };
-
-                    if !is_from_network {
-                        log::info!("Client: Local clipboard updated, sending to server...");
-                        let payload = if data.starts_with("file://") || data.starts_with('/') {
-                            format_clipboard_data(&data)
-                        } else {
-                            Some(ClipboardPayload::Text { text: data })
-                        };
-
-                        if let Some(p) = payload {
-                            let _ = tcp_client.send_clipboard(&p);
-                        }
-                    }
-                }
-            }
-        });
+        self.start_clipboard_monitoring();
     }
 }
+
+
 
 pub fn handle_client_edge_transition(
     target: &str,
@@ -960,41 +1093,185 @@ fn format_clipboard_data(paths_str: &str) -> Option<ClipboardPayload> {
     }
 }
 
-fn write_clipboard_files(files: &[crate::network::protocol::ClipboardFile]) -> Vec<String> {
-    let temp_dir = std::env::temp_dir().join("flow");
-    log::debug!("Clipboard: Writing {} received files/directories to temporary folder {:?}", files.len(), temp_dir);
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    if let Err(e) = std::fs::create_dir_all(&temp_dir) {
-        log::error!("Clipboard: Failed to create temp directory {:?}: {:?}", temp_dir, e);
+
+
+fn hash_clipboard_data(data: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn stream_offered_data<F>(id: &str, format: &str, data: &str, mut send_chunk: F)
+where
+    F: FnMut(ClipboardPayload),
+{
+    log::info!("Streaming clipboard data for promise id: {}, format: {}", id, format);
+    let bytes = if format == "text" {
+        data.as_bytes().to_vec()
+    } else {
+        if let Some(ClipboardPayload::Files { files }) = format_clipboard_data(data) {
+            match serde_json::to_vec(&files) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::error!("Failed to serialize files payload for promise streaming: {:?}", e);
+                    return;
+                }
+            }
+        } else {
+            log::warn!("No files to stream for format files, data: {}", data);
+            return;
+        }
+    };
+
+    let total_len = bytes.len();
+    let chunk_size = 64 * 1024; // 64 KB
+    let mut chunk_index = 0;
+    let mut offset = 0;
+
+    while offset < total_len {
+        let end = std::cmp::min(offset + chunk_size, total_len);
+        let chunk_data = bytes[offset..end].to_vec();
+        offset = end;
+        let is_last = offset >= total_len;
+
+        let payload = ClipboardPayload::Chunk {
+            id: id.to_string(),
+            chunk_index,
+            is_last,
+            data: chunk_data,
+        };
+
+        send_chunk(payload);
+        chunk_index += 1;
+
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn handle_incoming_clipboard_chunk(
+    id: &str,
+    is_last: bool,
+    data: &[u8],
+    accumulator: &Arc<Mutex<Option<ClipboardAccumulator>>>,
+) {
+    let has_tx = {
+        let active_lock = crate::hardware::ACTIVE_PROMISE.lock().unwrap();
+        active_lock.as_ref()
+            .filter(|p| p.uuid == id)
+            .map(|p| p.tx.is_some())
+            .unwrap_or(false)
+    };
+
+    if !has_tx {
+        return;
     }
 
-    let mut top_level_paths = Vec::new();
+    let mut accum_lock = accumulator.lock().unwrap();
 
-    for file in files {
-        let dest_path = temp_dir.join(&file.name);
-        if let Some(parent) = dest_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    if accum_lock.is_none() || accum_lock.as_ref().map(|a| &a.id) != Some(&id.to_string()) {
+        let format = crate::hardware::get_active_promise_format(id).unwrap_or_else(|| "text".to_string());
+        let size = crate::hardware::ACTIVE_PROMISE.lock().unwrap().as_ref()
+            .filter(|p| p.uuid == id)
+            .map(|p| p.size)
+            .unwrap_or(0);
+
+        *accum_lock = Some(ClipboardAccumulator {
+            id: id.to_string(),
+            format,
+            size,
+            buffer: Vec::new(),
+        });
+
+        crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let mut is_done = false;
+    let mut format = String::new();
+    let mut buffer = Vec::new();
+
+    if let Some(ref mut accum) = *accum_lock {
+        accum.buffer.extend_from_slice(data);
+        if accum.size > 0 {
+            let percent = (accum.buffer.len() * 100) / accum.size;
+            let percent = std::cmp::min(100, percent as u32);
+            crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(percent, std::sync::atomic::Ordering::Relaxed);
         }
-
-        if file.is_dir {
-            if let Err(e) = std::fs::create_dir_all(&dest_path) {
-                log::error!("Clipboard: Failed to create directory {:?}: {:?}", dest_path, e);
-            }
-        } else if let Some(ref data) = file.data {
-            if let Err(e) = std::fs::write(&dest_path, data) {
-                log::error!("Clipboard: Failed to write file {:?}: {:?}", dest_path, e);
-            }
-        }
-
-        let mut components = dest_path.strip_prefix(&temp_dir).unwrap().components();
-        if let Some(first_comp) = components.next() {
-            let top_level = temp_dir.join(first_comp.as_os_str());
-            let path_str = top_level.to_string_lossy().to_string();
-            if !top_level_paths.contains(&path_str) {
-                top_level_paths.push(path_str);
-            }
+        if is_last {
+            is_done = true;
+            format = accum.format.clone();
+            buffer = std::mem::take(&mut accum.buffer);
         }
     }
 
-    top_level_paths
+    if is_done {
+        *accum_lock = None;
+        crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let payload = match format.as_str() {
+            "text" => {
+                if let Ok(text) = String::from_utf8(buffer) {
+                    Some(crate::hardware::FulfillmentPayload::Text(text))
+                } else {
+                    log::error!("Clipboard: Failed to decode text payload UTF-8 string");
+                    None
+                }
+            }
+            "files" => {
+                if let Ok(files) = serde_json::from_slice::<Vec<crate::network::protocol::ClipboardFile>>(&buffer) {
+                    let local_paths = crate::network::protocol::write_clipboard_files(&files);
+                    Some(crate::hardware::FulfillmentPayload::Files(local_paths))
+                } else {
+                    log::error!("Clipboard: Failed to deserialize files payload from JSON");
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(p) = payload {
+            crate::hardware::PromisedClipboard::fulfill_promise(id, p);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_clipboard_data_determinism() {
+        let text = "hello flow clipboard!";
+        let h1 = hash_clipboard_data(text);
+        let h2 = hash_clipboard_data(text);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_clipboard_data_different_inputs() {
+        let text1 = "hello flow clipboard!";
+        let text2 = "hello flow clipboard!!";
+        let h1 = hash_clipboard_data(text1);
+        let h2 = hash_clipboard_data(text2);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_clipboard_loopback_global_ignore_matching() {
+        let sample_text = "test global loopback prevention payload";
+        let data_hash = hash_clipboard_data(sample_text);
+        
+        // Push the hash to simulate an incoming payload completion
+        crate::hardware::push_ignore_hash(data_hash);
+        
+        // Simulating the check that would be done in ClipboardListener callback
+        let is_from_network = crate::hardware::check_and_consume_ignore_hash(data_hash);
+        
+        assert!(is_from_network, "Hash should be recognized as originating from the network via global ignore queue");
+        
+        // Verify that the hash was removed after matching
+        let checked_again = crate::hardware::check_and_consume_ignore_hash(data_hash);
+        assert!(!checked_again, "Hash should be removed from global ignore list after matching");
+    }
 }

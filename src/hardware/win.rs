@@ -62,6 +62,23 @@ impl Clipboard {
     pub fn set_files(_files: Vec<String>) {}
 }
 
+pub(crate) fn set_promise_impl(_id: &str, _format: &str, _size: usize) {}
+
 pub fn get_screeninfo() -> (i32, i32) {
     (1920, 1080)
+}
+
+pub fn init_keyboard_layout() {}
+
+pub struct ClipboardListener;
+
+impl ClipboardListener {
+    pub fn new<F>(_on_change: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        Self
+    }
+    pub fn start(&self) {}
+    pub fn stop(&self) {}
 }

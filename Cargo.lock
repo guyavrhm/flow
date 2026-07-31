@@ -1582,6 +1582,7 @@ dependencies = [
  "rand 0.8.6",
  "rcgen",
  "rusqlite",
+ "rustc-hash 2.1.3",
  "rustls",
  "rustls-pemfile",
  "rustls-pki-types",

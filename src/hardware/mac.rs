@@ -8,6 +8,7 @@ use std::ptr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use crate::hardware::get_resource_path;
+use objc::{msg_send, sel, sel_impl};
 
 // --- SendRawPtr wrapper for FFI pointers to satisfy Send/Sync ---
 
@@ -995,5 +996,263 @@ impl Clipboard {
             cmd.arg(f);
         }
         let _ = cmd.output();
+    }
+}
+
+static IGNORED_CHANGE_COUNT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+static IN_SET_PROMISE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize) {
+    log::info!("macOS Clipboard: Registering promise for id: {}, format: {}", id, format);
+    
+    IN_SET_PROMISE.store(true, Ordering::Relaxed);
+    
+    {
+        let mut active = super::ACTIVE_PROMISE.lock().unwrap();
+        *active = Some(super::PromiseContext {
+            uuid: id.to_string(),
+            format: format.to_string(),
+            size,
+            tx: None,
+        });
+    }
+    
+    let owner = GLOBAL_OWNER.0 as cocoa::base::id;
+    
+    unsafe {
+        let pb: cocoa::base::id = msg_send![objc::class!(NSPasteboard), generalPasteboard];
+        let _: objc::runtime::BOOL = msg_send![pb, clearContents];
+        
+        let array: cocoa::base::id = msg_send![objc::class!(NSMutableArray), array];
+        if format == "text" {
+            let ns_type = to_nsstring("public.utf8-plain-text");
+            let _: () = msg_send![array, addObject:ns_type];
+            let _: () = msg_send![ns_type, release];
+        } else if format == "files" {
+            let ns_type = to_nsstring("NSFilenamesPboardType");
+            let _: () = msg_send![array, addObject:ns_type];
+            let _: () = msg_send![ns_type, release];
+        }
+        
+        let _: libc::intptr_t = msg_send![pb, declareTypes:array owner:owner];
+    }
+
+    let new_count = get_pasteboard_change_count();
+    IGNORED_CHANGE_COUNT.store(new_count, Ordering::Relaxed);
+    IN_SET_PROMISE.store(false, Ordering::Relaxed);
+}
+
+use std::sync::mpsc::{Sender, channel};
+use std::sync::atomic::{Ordering};
+use std::time::Duration;
+use objc::runtime::{Object, Sel};
+use objc::declare::ClassDecl;
+
+fn get_pasteboard_change_count() -> i64 {
+    unsafe {
+        let pb: cocoa::base::id = msg_send![objc::class!(NSPasteboard), generalPasteboard];
+        let count: libc::intptr_t = msg_send![pb, changeCount];
+        count as i64
+    }
+}
+
+pub struct ClipboardListener {
+    running: Arc<Mutex<bool>>,
+    thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    on_change: Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+impl ClipboardListener {
+    pub fn new<F>(on_change: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        Self {
+            running: Arc::new(Mutex::new(false)),
+            thread: Arc::new(Mutex::new(None)),
+            on_change: Arc::new(on_change),
+        }
+    }
+
+    pub fn start(&self) {
+        let running = self.running.clone();
+        *running.lock().unwrap() = true;
+        let on_change = self.on_change.clone();
+
+        let handle = thread::spawn(move || {
+            let mut last_change_count = get_pasteboard_change_count();
+            while *running.lock().unwrap() {
+                thread::sleep(Duration::from_millis(250));
+                
+                if IN_SET_PROMISE.load(Ordering::Relaxed) || crate::hardware::IN_SET_CLIPBOARD.load(Ordering::Relaxed) {
+                    continue;
+                }
+                
+                let current_change_count = get_pasteboard_change_count();
+                if current_change_count != last_change_count {
+                    last_change_count = current_change_count;
+                    
+                    let ignored = IGNORED_CHANGE_COUNT.load(Ordering::Relaxed);
+                    if current_change_count == ignored {
+                        log::info!("ClipboardListener: Ignoring change count {} matching registered promise", current_change_count);
+                        continue;
+                    }
+                    
+                    on_change();
+                }
+            }
+        });
+
+        let mut thread_lock = self.thread.lock().unwrap();
+        *thread_lock = Some(handle);
+    }
+
+    pub fn stop(&self) {
+        {
+            let mut running = self.running.lock().unwrap();
+            *running = false;
+        }
+        let mut thread_lock = self.thread.lock().unwrap();
+        if let Some(handle) = thread_lock.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for ClipboardListener {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+static REGISTER_OWNER_CLASS: Lazy<()> = Lazy::new(|| {
+    unsafe {
+        let superclass = objc::class!(NSObject);
+        let mut decl = ClassDecl::new("FlowPasteboardOwner", superclass).unwrap();
+        decl.add_method(
+            objc::sel!(pasteboard:provideDataForType:),
+            provide_data as extern "C" fn(&Object, Sel, cocoa::base::id, cocoa::base::id),
+        );
+        decl.register();
+    }
+});
+
+static GLOBAL_OWNER: Lazy<SendRawPtr> = Lazy::new(|| unsafe {
+    let _ = *REGISTER_OWNER_CLASS;
+    let owner: cocoa::base::id = msg_send![objc::class!(FlowPasteboardOwner), new];
+    SendRawPtr(owner as *mut c_void)
+});
+
+extern "C" fn provide_data(_this: &Object, _cmd: Sel, pasteboard: cocoa::base::id, pb_type: cocoa::base::id) {
+    let utf8_str: *const libc::c_char = unsafe { msg_send![pb_type, UTF8String] };
+    let format_str = if !utf8_str.is_null() {
+        unsafe { std::ffi::CStr::from_ptr(utf8_str).to_string_lossy().into_owned() }
+    } else {
+        return;
+    };
+    log::info!("macOS Clipboard FFI: Pasteboard requested format {}", format_str);
+
+    let (uuid, rx) = {
+        let mut active_lock = super::ACTIVE_PROMISE.lock().unwrap();
+        if let Some(ref mut active) = *active_lock {
+            let (tx, rx) = channel();
+            active.tx = Some(tx);
+            (active.uuid.clone(), rx)
+        } else {
+            return;
+        }
+    };
+
+    {
+        let callback_lock = super::PROMISE_REQUEST_CALLBACK.lock().unwrap();
+        if let Some(ref callback) = *callback_lock {
+            callback(uuid.clone());
+        } else {
+            log::error!("macOS Clipboard FFI: PROMISE_REQUEST_CALLBACK not initialized!");
+            return;
+        }
+    }
+
+    let timeout = Duration::from_secs(15);
+    match rx.recv_timeout(timeout) {
+        Ok(payload) => {
+            let pool: cocoa::base::id = unsafe {
+                let pool_cls = objc::class!(NSAutoreleasePool);
+                msg_send![pool_cls, new]
+            };
+
+            let final_data_to_hash = match payload {
+                super::FulfillmentPayload::Text(text) => {
+                    unsafe {
+                        let ns_str = to_nsstring(&text);
+                        let ns_type = to_nsstring("public.utf8-plain-text");
+                        let _: () = msg_send![pasteboard, setString:ns_str forType:ns_type];
+                        let _: () = msg_send![ns_str, release];
+                        let _: () = msg_send![ns_type, release];
+                    }
+                    Some(text)
+                }
+                super::FulfillmentPayload::Files(local_paths) => {
+                    let joined = local_paths.join("\n");
+                    unsafe {
+                        let array: cocoa::base::id = msg_send![objc::class!(NSMutableArray), array];
+                        for path in local_paths {
+                            let ns_str = to_nsstring(&path);
+                            let _: () = msg_send![array, addObject:ns_str];
+                            let _: () = msg_send![ns_str, release];
+                        }
+                        let ns_type = to_nsstring("NSFilenamesPboardType");
+                        let _: () = msg_send![pasteboard, setPropertyList:array forType:ns_type];
+                        let _: () = msg_send![ns_type, release];
+                    }
+                    Some(joined)
+                }
+            };
+
+            unsafe {
+                let _: () = msg_send![pool, release];
+            }
+
+            if let Some(data_str) = final_data_to_hash {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = rustc_hash::FxHasher::default();
+                data_str.hash(&mut hasher);
+                let h = hasher.finish();
+                crate::hardware::push_ignore_hash(h);
+                log::info!("macOS Clipboard FFI: Ignored promise hash {} to prevent loopback", h);
+            }
+        }
+        Err(e) => {
+            log::warn!("macOS Clipboard FFI: Timeout or disconnect waiting for clipboard fulfillment: {:?}", e);
+            crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn to_nsstring(s: &str) -> cocoa::base::id {
+    unsafe {
+        let class = objc::class!(NSString);
+        let bytes = s.as_bytes();
+        let ns_str: cocoa::base::id = msg_send![class, alloc];
+        let ns_str: cocoa::base::id = msg_send![ns_str, initWithBytes:bytes.as_ptr() length:bytes.len() encoding:4]; // 4 = NSUTF8StringEncoding
+        ns_str
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mac_change_count_increments() {
+        let original_clipboard = Clipboard::data();
+        
+        let c1 = get_pasteboard_change_count();
+        Clipboard::set_text("test-change-count-text-1");
+        thread::sleep(Duration::from_millis(150));
+        let c2 = get_pasteboard_change_count();
+        
+        Clipboard::set_text(&original_clipboard);
+        assert!(c2 > c1, "changeCount did not increment after set_text. c1: {}, c2: {}", c1, c2);
     }
 }

@@ -779,6 +779,8 @@ impl Clipboard {
     }
 }
 
+pub(crate) fn set_promise_impl(_id: &str, _format: &str, _size: usize) {}
+
 fn url_decode(s: &str) -> String {
     let mut res = String::new();
     let mut chars = s.chars();
@@ -810,4 +812,19 @@ pub fn get_screeninfo() -> (i32, i32) {
         XCloseDisplay(display);
         (width as i32, height as i32)
     }
+}
+
+pub fn init_keyboard_layout() {}
+
+pub struct ClipboardListener;
+
+impl ClipboardListener {
+    pub fn new<F>(_on_change: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        Self
+    }
+    pub fn start(&self) {}
+    pub fn stop(&self) {}
 }
