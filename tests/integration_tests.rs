@@ -3,10 +3,16 @@ use flow::hardware::{Clipboard, MouseController};
 use flow::network::protocol::InputEvent;
 use flow::network::udp::{format_event, parse_event};
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::net::TcpListener;
+
+static DB_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn get_db_lock() -> &'static Mutex<()> {
+    DB_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // ==========================================
 // 1. UDP FORMATTING & PARSING TESTS
@@ -86,6 +92,7 @@ fn test_udp_malformed_event_parsing() {
 
 #[test]
 fn test_sqlite_settings_persistence() {
+    let _lock = get_db_lock().lock().unwrap();
     use std::fs;
     use flow::config::{
         initialize_db, get_settings, save_settings, PC_CLIENT, ENCRYPTION_ON,
@@ -510,5 +517,144 @@ mod linux_tests {
         } else {
             assert_eq!(new_pos, target);
         }
+    }
+}
+
+// ==========================================
+// 5. RECONNECTION INTEGRATION TEST
+// ==========================================
+
+#[test]
+fn test_client_reconnection_flow() {
+    let _lock = get_db_lock().lock().unwrap();
+    use flow::engine::AppEngine;
+    use flow::config::{initialize_db, SettingsData};
+    use flow::paths::get_db_path;
+    use std::fs;
+
+    // Backup DB
+    let db_path = get_db_path();
+    let backup_path = db_path.with_extension("db.backup");
+    let has_backup = if db_path.exists() {
+        fs::copy(&db_path, &backup_path).is_ok()
+    } else {
+        false
+    };
+
+    // Ensure clean test DB
+    if db_path.exists() {
+        let _ = fs::remove_file(&db_path);
+    }
+    initialize_db().unwrap();
+
+    // Create server engine
+    let server_engine = AppEngine::new();
+    {
+        let mut s = server_engine.settings.lock().unwrap();
+        s.ip = "127.0.0.1".to_string();
+        s.pc = 1; // Server
+    }
+
+    // Create client engine
+    let client_engine = AppEngine::new();
+    {
+        let mut s = client_engine.settings.lock().unwrap();
+        s.ip = "127.0.0.1".to_string();
+        s.pc = 2; // Client
+    }
+
+    // Thread to auto-approve trust requests
+    let server_trusts = server_engine.pending_trusts.clone();
+    let client_trusts = client_engine.pending_trusts.clone();
+    let trust_thread_running = Arc::new(Mutex::new(true));
+    let trust_running_clone = trust_thread_running.clone();
+    let trust_join_handle = thread::spawn(move || {
+        while *trust_running_clone.lock().unwrap() {
+            {
+                let mut server_list = server_trusts.lock().unwrap();
+                while let Some(req) = server_list.pop() {
+                    let _ = req.tx.send(true);
+                }
+            }
+            {
+                let mut client_list = client_trusts.lock().unwrap();
+                while let Some(req) = client_list.pop() {
+                    let _ = req.tx.send(true);
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    // Step 1: Start Client FIRST. Server is not running.
+    println!("Test: Starting Client while Server is down...");
+    client_engine.start();
+
+    // Give it a moment. Client should fail to connect but keep retrying.
+    thread::sleep(Duration::from_secs(1));
+    assert!(!*client_engine.is_connected.lock().unwrap());
+
+    // Step 2: Now start the Server.
+    println!("Test: Starting Server. Client should automatically reconnect...");
+    server_engine.start();
+
+    // Wait for reconnection
+    let mut success = false;
+    for _ in 0..50 {
+        if *client_engine.is_connected.lock().unwrap() && *server_engine.is_connected.lock().unwrap() {
+            success = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(success, "Client failed to automatically connect to the server when server came up");
+    println!("Test: Connected successfully!");
+
+    // Step 3: Stop the Server. Client should detect disconnect.
+    println!("Test: Stopping Server...");
+    server_engine.stop();
+
+    // Wait for client to detect disconnect
+    let mut disconnected = false;
+    for _ in 0..50 {
+        if !*client_engine.is_connected.lock().unwrap() {
+            disconnected = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(disconnected, "Client failed to detect server disconnection");
+    println!("Test: Client disconnected successfully.");
+
+    // Step 4: Start the Server back up. Client should reconnect.
+    println!("Test: Restarting Server...");
+    server_engine.start();
+
+    let mut reconnected = false;
+    for _ in 0..50 {
+        if *client_engine.is_connected.lock().unwrap() && *server_engine.is_connected.lock().unwrap() {
+            reconnected = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(reconnected, "Client failed to automatically reconnect to the restarted server");
+    println!("Test: Reconnected successfully!");
+
+    // Cleanup
+    server_engine.stop();
+    client_engine.stop();
+    {
+        let mut running = trust_thread_running.lock().unwrap();
+        *running = false;
+    }
+    let _ = trust_join_handle.join();
+
+    // Restore DB backup
+    if has_backup {
+        let _ = fs::copy(&backup_path, &db_path);
+        let _ = fs::remove_file(&backup_path);
+    } else if db_path.exists() {
+        let _ = fs::remove_file(&db_path);
     }
 }

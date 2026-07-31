@@ -37,8 +37,8 @@ impl TcpServer {
         on_clipboard_recv: FClip,
     ) -> std::io::Result<()>
     where
-        FConn: Fn(String, ScreenMetrics, crate::crypto::UdpCryptor) + Send + Sync + 'static,
-        FDisconn: Fn(String) + Send + Sync + 'static,
+        FConn: Fn(String, ScreenMetrics, crate::crypto::UdpCryptor, u64) + Send + Sync + 'static,
+        FDisconn: Fn(String, u64) + Send + Sync + 'static,
         FClip: Fn(ClipboardPayload, String) + Send + Sync + 'static,
     {
         let port = 8118;
@@ -137,6 +137,7 @@ impl TcpServer {
                             rand::thread_rng().fill(&mut udp_salt);
 
                             let cryptor = crate::crypto::UdpCryptor::new(&udp_key, udp_salt);
+                            let connection_id: u64 = rand::random();
 
                             // Send UDP session key config to client over TLS
                             let session_config = UdpSessionConfig {
@@ -171,7 +172,7 @@ impl TcpServer {
                             stream_owned.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
                             stream_owned.get_mut().set_write_timeout(None).unwrap();
 
-                            log::info!("TCP Server: Client {} authenticated & verified", ip);
+                            log::info!("TCP Server: Client {} authenticated & verified (conn_id: {})", ip, connection_id);
 
                             // Load attachments
                             let attachments =
@@ -197,7 +198,7 @@ impl TcpServer {
                                 list.push(client_info.clone());
                             }
 
-                            on_conn(ip.clone(), metrics, cryptor);
+                            on_conn(ip.clone(), metrics, cryptor, connection_id);
 
                             loop {
                                 {
@@ -236,16 +237,15 @@ impl TcpServer {
                             }
 
                             // Cleanup client
-                            log::info!("TCP: Client {} disconnected", ip);
+                            log::info!("TCP: Client {} disconnected (conn_id: {})", ip, connection_id);
                             {
                                 let mut list = clients_inner.lock().unwrap();
                                 list.retain(|c| {
-                                    let lock = c.lock().unwrap();
-                                    lock.ip != ip
+                                    !Arc::ptr_eq(c, &client_info)
                                 });
                             }
 
-                            on_disc(ip);
+                            on_disc(ip, connection_id);
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {

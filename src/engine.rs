@@ -22,6 +22,7 @@ pub struct ClientInfo {
     pub udp_addr: Option<SocketAddr>,
     pub cryptor: crate::crypto::UdpCryptor,
     pub udp_seq: u64,
+    pub connection_id: u64,
 }
 
 pub struct AppEngine {
@@ -165,8 +166,8 @@ impl AppEngine {
         let active_clients_handshake = active_clients.clone();
 
         // TCP callbacks
-        let on_connect = move |ip: String, metrics: ScreenMetrics, cryptor: crate::crypto::UdpCryptor| {
-            log::info!("Server: Client connected: {}", ip);
+        let on_connect = move |ip: String, metrics: ScreenMetrics, cryptor: crate::crypto::UdpCryptor, connection_id: u64| {
+            log::info!("Server: Client connected: {} (conn_id: {})", ip, connection_id);
             {
                 let mut conn = is_connected.lock().unwrap();
                 *conn = true;
@@ -202,6 +203,7 @@ impl AppEngine {
                             udp_addr: Some(udp_addr),
                             cryptor: cryptor_clone,
                             udp_seq: 0,
+                            connection_id,
                         },
                     );
                 }
@@ -214,24 +216,35 @@ impl AppEngine {
         let mouse_listener_disc = self.mouse_listener.clone();
         let keyboard_listener_disc = self.keyboard_listener.clone();
 
-        let on_disconnect = move |ip: String| {
-            log::info!("Server: Client disconnected: {}", ip);
+        let on_disconnect = move |ip: String, conn_id: u64| {
+            log::info!("Server: Client disconnected: {} (conn_id: {})", ip, conn_id);
             let mut clients = active_clients_disc.lock().unwrap();
-            clients.remove(&ip);
+            
+            let should_remove = if let Some(info) = clients.get(&ip) {
+                info.connection_id == conn_id
+            } else {
+                false
+            };
 
-            if clients.is_empty() {
-                let mut conn = is_connected_disc.lock().unwrap();
-                *conn = false;
-            }
+            if should_remove {
+                clients.remove(&ip);
 
-            let mut curr = current_controlled_disc.lock().unwrap();
-            if *curr == ip {
-                // Revert control to Server
-                *curr = "main".to_string();
-                let mut ml = mouse_listener_disc.lock().unwrap();
-                *ml = None;
-                let mut kl = keyboard_listener_disc.lock().unwrap();
-                *kl = None;
+                if clients.is_empty() {
+                    let mut conn = is_connected_disc.lock().unwrap();
+                    *conn = false;
+                }
+
+                let mut curr = current_controlled_disc.lock().unwrap();
+                if *curr == ip {
+                    // Revert control to Server
+                    *curr = "main".to_string();
+                    let mut ml = mouse_listener_disc.lock().unwrap();
+                    *ml = None;
+                    let mut kl = keyboard_listener_disc.lock().unwrap();
+                    *kl = None;
+                }
+            } else {
+                log::info!("Server: Ignoring disconnect for {} as a newer connection exists", ip);
             }
         };
 
@@ -607,66 +620,89 @@ impl AppEngine {
         let server_ip = settings.ip.clone();
         let is_connected = self.is_connected.clone();
         let udp_client = self.udp_client.clone();
-
-        let on_connect = move |key: [u8; 32], salt: [u8; 4]| {
-            log::info!("Client: Connected to server");
-            {
-                let mut conn = is_connected.lock().unwrap();
-                *conn = true;
-            }
-
-            let _ = udp_client.start(&server_ip, key, salt);
-        };
-
-        let is_connected_disc = self.is_connected.clone();
-        let udp_client_disc = self.udp_client.clone();
-        let on_disconnect = move || {
-            log::info!("Client: Disconnected from server");
-            {
-                let mut conn = is_connected_disc.lock().unwrap();
-                *conn = false;
-            }
-            udp_client_disc.stop();
-        };
-
         let clipboard_history = self.clipboard_history.clone();
-        let on_clipboard_recv = move |payload: ClipboardPayload| {
-            let data_repr = match &payload {
-                ClipboardPayload::Text { text } => text.clone(),
-                ClipboardPayload::Files { files } => format!("files:{}", files.len()),
-            };
-            log::info!("Client: Received clipboard update from server: {}", data_repr);
-
-            {
-                let mut history = clipboard_history.lock().unwrap();
-                history.push(data_repr);
-            }
-
-            match payload {
-                ClipboardPayload::Text { text } => {
-                    Clipboard::set_text(&text);
-                }
-                ClipboardPayload::Files { files } => {
-                    let local_paths = write_clipboard_files(&files);
-                    Clipboard::set_files(local_paths);
-                }
-            }
-        };
-
         let tcp_client = self.tcp_client.clone();
         let ip = settings.ip.clone();
         let pending_trusts = self.pending_trusts.clone();
+        let is_running_loop = self.is_running.clone();
 
         thread::spawn(move || {
-            if let Err(e) = tcp_client.connect(
-                &ip,
-                settings.clone(),
-                pending_trusts,
-                on_connect,
-                on_disconnect,
-                on_clipboard_recv,
-            ) {
-                log::error!("TCP Client failed to connect: {:?}", e);
+            while *is_running_loop.lock().unwrap() {
+                let connected = {
+                    let conn = is_connected.lock().unwrap();
+                    *conn
+                };
+
+                if !connected {
+                    log::info!("TCP Client attempting to connect to server at {}...", ip);
+
+                    // Recreate closures on each connection attempt
+                    let is_connected_conn = is_connected.clone();
+                    let udp_client_conn = udp_client.clone();
+                    let server_ip_conn = server_ip.clone();
+                    let on_connect = move |key: [u8; 32], salt: [u8; 4]| {
+                        log::info!("Client: Connected to server");
+                        {
+                            let mut conn = is_connected_conn.lock().unwrap();
+                            *conn = true;
+                        }
+                        let _ = udp_client_conn.start(&server_ip_conn, key, salt);
+                    };
+
+                    let is_connected_disc = is_connected.clone();
+                    let udp_client_disc = udp_client.clone();
+                    let on_disconnect = move || {
+                        log::info!("Client: Disconnected from server");
+                        {
+                            let mut conn = is_connected_disc.lock().unwrap();
+                            *conn = false;
+                        }
+                        udp_client_disc.stop();
+                    };
+
+                    let clipboard_history_clip = clipboard_history.clone();
+                    let on_clipboard_recv = move |payload: ClipboardPayload| {
+                        let data_repr = match &payload {
+                            ClipboardPayload::Text { text } => text.clone(),
+                            ClipboardPayload::Files { files } => format!("files:{}", files.len()),
+                        };
+                        log::info!("Client: Received clipboard update from server: {}", data_repr);
+
+                        {
+                            let mut history = clipboard_history_clip.lock().unwrap();
+                            history.push(data_repr);
+                        }
+
+                        match payload {
+                            ClipboardPayload::Text { text } => {
+                                Clipboard::set_text(&text);
+                            }
+                            ClipboardPayload::Files { files } => {
+                                let local_paths = write_clipboard_files(&files);
+                                Clipboard::set_files(local_paths);
+                            }
+                        }
+                    };
+
+                    if let Err(e) = tcp_client.connect(
+                        &ip,
+                        settings.clone(),
+                        pending_trusts.clone(),
+                        on_connect,
+                        on_disconnect,
+                        on_clipboard_recv,
+                    ) {
+                        log::error!("TCP Client failed to connect: {:?}", e);
+                    }
+                }
+
+                // Sleep for up to 2 seconds, but exit quickly if the app is stopped
+                for _ in 0..10 {
+                    if !*is_running_loop.lock().unwrap() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
             }
         });
 

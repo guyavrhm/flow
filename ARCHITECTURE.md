@@ -119,9 +119,12 @@ To demarcate JSON payloads sent over the stream, each message is transmitted wit
 2. **UDP Session Key Configuration**:
    * Immediately after TLS is established, the Server generates a random 32-byte key and 4-byte salt, serializing them into a `UdpSessionConfig` message sent to the client.
 3. **Screen Metrics Exchange**:
-   * The client responds by sending its screen dimensions serialized as JSON in `ScreenMetrics` format.
+   - The client responds by sending its screen dimensions serialized as JSON in `ScreenMetrics` format.
 4. **Control & Clipboard Channel**:
-   * When a clipboard change is detected on either client or server, a `ClipboardPayload` is serialized to JSON and transmitted over the TLS stream.
+   - When a clipboard change is detected on either client or server, a `ClipboardPayload` is serialized to JSON and transmitted over the TLS stream.
+5. **Connection Persistence & Reconnection Loop**:
+   - The client runs a background connection loop (using cooperative 200ms checks) that automatically retries the TCP/TLS connection every 2 seconds if disconnected.
+   - To prevent clean-up race conditions when a client disconnects and quickly reconnects, the server generates a unique ephemeral random `connection_id` (`u64`) for each session. During cleanup, the server checks this ID to ensure it only terminates the exact defunct connection instance, and uses pointer comparison (`Arc::ptr_eq`) to preserve active sessions.
 
 ### 4.2 UDP Input Channel (Port 8118)
 
@@ -171,7 +174,7 @@ Once decrypted, the payload follows a space-delimited text protocol:
 | Thread | Spawned by | Purpose / Role | Lifespan |
 |---|---|---|---|
 | **Main Thread (UI)** | System | Runs the `egui` interface and tray indicators. | Application lifetime |
-| **TCP Client Thread** | engine.rs | Connects to the server's TCP socket and runs a persistent blocking loop to receive incoming server clipboard packets. | Active while Client is running |
+| **TCP Client Thread** | engine.rs | Runs a periodic reconnection loop that attempts to connect to the server's TCP socket every 2 seconds when disconnected, and runs a persistent blocking loop to receive incoming server clipboard packets once connected. | Active while Client is running |
 | **UDP Client Thread** | udp.rs | Listens on a UDP socket for real-time input events (`Move`, `KeyPress`, `Stop`), decrypts them, and immediately simulates them on the local OS. | Active while Client is connected |
 | **Clipboard Monitor Thread** | engine.rs | Runs a 1-second loop polling the local OS clipboard and sends changes to the server via TCP. | Active while Client is running |
 
