@@ -36,7 +36,8 @@ fn main() {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("flow")
             .with_inner_size([780.0, 430.0])
-            .with_resizable(false),
+            .with_resizable(false)
+            .with_visible(false),
         ..Default::default()
     };
 

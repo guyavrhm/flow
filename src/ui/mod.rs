@@ -23,6 +23,7 @@ pub struct FlowApp {
     show_trash_list: bool,
     status_msg: String,
     local_fingerprint: String,
+    initial_hide_done: bool,
 }
 
 impl FlowApp {
@@ -63,10 +64,11 @@ impl FlowApp {
             canvas,
             engine,
             tray,
-            show_window: true,
+            show_window: false,
             show_trash_list: false,
             status_msg: "".to_string(),
             local_fingerprint,
+            initial_hide_done: false,
         }
     }
 
@@ -99,10 +101,23 @@ impl FlowApp {
 
 impl eframe::App for FlowApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.initial_hide_done {
+            self.initial_hide_done = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_window = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if event.id.0 == self.tray.menu_settings_id {
                 log::info!("Tray: Settings menu item clicked");
                 self.show_window = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             } else if event.id.0 == self.tray.menu_help_id {
                 log::info!("Tray: Help menu item clicked");
                 if let Err(e) = webbrowser::open("https://guyavrhm.github.io/flow") {
@@ -192,6 +207,7 @@ impl eframe::App for FlowApp {
                         }
                         if ui.button("Hide Window").clicked() {
                             self.show_window = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                         }
                     });
 
