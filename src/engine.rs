@@ -5,6 +5,7 @@ use crate::hardware::{
 use crate::network::protocol::{ClipboardPayload, InputEvent, ScreenMetrics};
 use crate::network::tcp::{TcpClient, TcpServer};
 use crate::network::udp::{UdpClient, UdpServer};
+use crate::network::tls::PendingTrustRequest;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,8 @@ pub struct ClientInfo {
     pub mouse_y: i32,
     pub attachments: ScreenAttachments,
     pub udp_addr: Option<SocketAddr>,
+    pub cryptor: crate::crypto::UdpCryptor,
+    pub udp_seq: u64,
 }
 
 pub struct AppEngine {
@@ -42,6 +45,7 @@ pub struct AppEngine {
 
     // Status signals for UI
     pub is_connected: Arc<Mutex<bool>>,
+    pub pending_trusts: Arc<Mutex<Vec<PendingTrustRequest>>>,
 }
 
 impl AppEngine {
@@ -64,6 +68,7 @@ impl AppEngine {
             udp_client: Arc::new(UdpClient::new()),
             clipboard_history: Arc::new(Mutex::new(Vec::new())),
             is_connected: Arc::new(Mutex::new(false)),
+            pending_trusts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -141,7 +146,6 @@ impl AppEngine {
         let active_clients = self.active_clients.clone();
         let current_controlled = self.current_controlled.clone();
         let is_connected = self.is_connected.clone();
-        let settings_clone = self.settings.clone();
 
         // Initialize UDP Server
         let udp_server = match UdpServer::new() {
@@ -159,10 +163,9 @@ impl AppEngine {
 
         let udp_server_handshake = udp_server_arc.clone();
         let active_clients_handshake = active_clients.clone();
-        let settings_handshake = settings.clone();
 
         // TCP callbacks
-        let on_connect = move |ip: String, metrics: ScreenMetrics| {
+        let on_connect = move |ip: String, metrics: ScreenMetrics, cryptor: crate::crypto::UdpCryptor| {
             log::info!("Server: Client connected: {}", ip);
             {
                 let mut conn = is_connected.lock().unwrap();
@@ -172,11 +175,11 @@ impl AppEngine {
             // Perform UDP Handshake in a background task
             let udp_server_task = udp_server_handshake.clone();
             let active_clients_task = active_clients_handshake.clone();
-            let settings_task = settings_handshake.clone();
             let client_ip = ip.clone();
+            let cryptor_clone = cryptor.clone();
 
             thread::spawn(move || {
-                if let Ok(udp_addr) = udp_server_task.listen_handshake(&client_ip, &settings_task) {
+                if let Ok(udp_addr) = udp_server_task.listen_handshake(&client_ip, &cryptor_clone) {
                     let mut clients = active_clients_task.lock().unwrap();
                     let attachments =
                         get_attachments(&client_ip).unwrap_or_else(|_| ScreenAttachments {
@@ -197,6 +200,8 @@ impl AppEngine {
                             mouse_y: metrics.height / 2,
                             attachments,
                             udp_addr: Some(udp_addr),
+                            cryptor: cryptor_clone,
+                            udp_seq: 0,
                         },
                     );
                 }
@@ -232,7 +237,6 @@ impl AppEngine {
 
         let clipboard_history = self.clipboard_history.clone();
         let tcp_server_clip = self.tcp_server.clone();
-        let settings_clip = settings_clone.clone();
 
         let on_clipboard_recv = move |payload: ClipboardPayload, from_ip: String| {
             let data_repr = match &payload {
@@ -260,17 +264,13 @@ impl AppEngine {
             }
 
             // Broadcast to other clients
-            let s_data = {
-                let s = settings_clip.lock().unwrap();
-                s.clone()
-            };
-            tcp_server_clip.broadcast_clipboard(&payload, Some(&from_ip), &s_data);
+            tcp_server_clip.broadcast_clipboard(&payload, Some(&from_ip));
         };
 
         // Start TCP Server
         if let Err(e) =
             self.tcp_server
-                .start(settings, on_connect, on_disconnect, on_clipboard_recv)
+                .start(settings, self.pending_trusts.clone(), on_connect, on_disconnect, on_clipboard_recv)
         {
             log::error!("TCP Server failed to start: {:?}", e);
             return;
@@ -288,7 +288,6 @@ impl AppEngine {
         let mouse_listener = self.mouse_listener.clone();
         let keyboard_listener = self.keyboard_listener.clone();
         let udp_server = self.udp_server.clone();
-        let settings = self.settings.clone();
 
         thread::spawn(move || {
             let mouse_ctrl = MouseController::new();
@@ -372,82 +371,93 @@ impl AppEngine {
                     let active_clients_cb = active_clients.clone();
                     let current_controlled_cb = current_controlled.clone();
                     let udp_server_cb = udp_server.clone();
-                    let settings_cb = settings.clone();
 
                     let on_move = move |dx: i32, dy: i32| {
                         let curr = current_controlled_cb.lock().unwrap().clone();
-                        let mut clients = active_clients_cb.lock().unwrap();
-                        if let Some(c) = clients.get_mut(&curr) {
-                            c.mouse_x = (c.mouse_x + dx).clamp(0, c.width);
-                            c.mouse_y = (c.mouse_y + dy).clamp(0, c.height);
+                        let mut next_target: Option<String> = None;
+                        let mut side = -1;
+                        let mut client_width = 0;
+                        let mut client_height = 0;
+                        let mut client_mouse_x = 0;
+                        let mut client_mouse_y = 0;
 
-                            if let Some(udp) = udp_server_cb.lock().unwrap().as_ref() {
-                                if let Some(addr) = c.udp_addr {
-                                    let s_data = settings_cb.lock().unwrap().clone();
-                                    let _ = udp.send_event(
-                                        &InputEvent::Move {
-                                            x: c.mouse_x,
-                                            y: c.mouse_y,
-                                        },
-                                        addr,
-                                        &s_data,
-                                    );
+                        {
+                            let mut clients = active_clients_cb.lock().unwrap();
+                            if let Some(c) = clients.get_mut(&curr) {
+                                c.mouse_x = (c.mouse_x + dx).clamp(0, c.width);
+                                c.mouse_y = (c.mouse_y + dy).clamp(0, c.height);
+
+                                if let Some(udp) = udp_server_cb.lock().unwrap().as_ref() {
+                                    if let Some(addr) = c.udp_addr {
+                                        c.udp_seq += 1;
+                                        let seq = c.udp_seq;
+                                        let _ = udp.send_event(
+                                            &InputEvent::Move {
+                                                x: c.mouse_x,
+                                                y: c.mouse_y,
+                                            },
+                                            addr,
+                                            &c.cryptor,
+                                            seq,
+                                        );
+                                    }
                                 }
-                            }
 
-                            let mut side = -1;
-                            let mut next_target: Option<String> = None;
-
-                            if c.mouse_x < 5 {
-                                next_target = c.attachments.left.clone();
-                                side = 0;
-                            } else if c.mouse_x > c.width - 5 {
-                                next_target = c.attachments.right.clone();
-                                side = 1;
-                            } else if c.mouse_y < 5 {
-                                next_target = c.attachments.top.clone();
-                                side = 2;
-                            } else if c.mouse_y > c.height - 5 {
-                                next_target = c.attachments.bottom.clone();
-                                side = 3;
+                                if c.mouse_x < 5 {
+                                    next_target = c.attachments.left.clone();
+                                    side = 0;
+                                } else if c.mouse_x > c.width - 5 {
+                                    next_target = c.attachments.right.clone();
+                                    side = 1;
+                                } else if c.mouse_y < 5 {
+                                    next_target = c.attachments.top.clone();
+                                    side = 2;
+                                } else if c.mouse_y > c.height - 5 {
+                                    next_target = c.attachments.bottom.clone();
+                                    side = 3;
+                                }
+                                client_width = c.width;
+                                client_height = c.height;
+                                client_mouse_x = c.mouse_x;
+                                client_mouse_y = c.mouse_y;
                             }
+                        }
 
-                            if let Some(ref target) = next_target {
-                                handle_client_edge_transition(
-                                    target,
-                                    side,
-                                    c.width,
-                                    c.height,
-                                    c.mouse_x,
-                                    c.mouse_y,
-                                    &current_controlled_cb,
-                                    &active_clients_cb,
-                                    &udp_server_cb,
-                                    &settings_cb,
-                                );
-                            }
+                        if let Some(ref target) = next_target {
+                            handle_client_edge_transition(
+                                target,
+                                side,
+                                client_width,
+                                client_height,
+                                client_mouse_x,
+                                client_mouse_y,
+                                &current_controlled_cb,
+                                &active_clients_cb,
+                                &udp_server_cb,
+                            );
                         }
                     };
 
                     let udp_server_click = udp_server.clone();
                     let active_clients_click = active_clients.clone();
                     let current_controlled_click = current_controlled.clone();
-                    let settings_click = settings.clone();
 
                     let on_click = move |_x: i32, _y: i32, btn: String, pressed: bool| {
                         let curr = current_controlled_click.lock().unwrap().clone();
-                        let clients = active_clients_click.lock().unwrap();
-                        if let Some(c) = clients.get(&curr) {
+                        let mut clients = active_clients_click.lock().unwrap();
+                        if let Some(c) = clients.get_mut(&curr) {
                             if let Some(udp) = udp_server_click.lock().unwrap().as_ref() {
                                 if let Some(addr) = c.udp_addr {
-                                    let s_data = settings_click.lock().unwrap().clone();
+                                    c.udp_seq += 1;
+                                    let seq = c.udp_seq;
                                     let _ = udp.send_event(
                                         &InputEvent::MouseClick {
                                             button: btn,
                                             pressed,
                                         },
                                         addr,
-                                        &s_data,
+                                        &c.cryptor,
+                                        seq,
                                     );
                                 }
                             }
@@ -457,19 +467,20 @@ impl AppEngine {
                     let udp_server_scroll = udp_server.clone();
                     let active_clients_scroll = active_clients.clone();
                     let current_controlled_scroll = current_controlled.clone();
-                    let settings_scroll = settings.clone();
 
                     let on_scroll = move |_x: i32, _y: i32, dx: i32, dy: i32| {
                         let curr = current_controlled_scroll.lock().unwrap().clone();
-                        let clients = active_clients_scroll.lock().unwrap();
-                        if let Some(c) = clients.get(&curr) {
+                        let mut clients = active_clients_scroll.lock().unwrap();
+                        if let Some(c) = clients.get_mut(&curr) {
                             if let Some(udp) = udp_server_scroll.lock().unwrap().as_ref() {
                                 if let Some(addr) = c.udp_addr {
-                                    let s_data = settings_scroll.lock().unwrap().clone();
+                                    c.udp_seq += 1;
+                                    let seq = c.udp_seq;
                                     let _ = udp.send_event(
                                         &InputEvent::MouseScroll { dx, dy },
                                         addr,
-                                        &s_data,
+                                        &c.cryptor,
+                                        seq,
                                     );
                                 }
                             }
@@ -487,19 +498,20 @@ impl AppEngine {
                     let udp_server_press = udp_server.clone();
                     let active_clients_press = active_clients.clone();
                     let current_controlled_press = current_controlled.clone();
-                    let settings_press = settings.clone();
 
                     let on_press = move |key: String| {
                         let curr = current_controlled_press.lock().unwrap().clone();
-                        let clients = active_clients_press.lock().unwrap();
-                        if let Some(c) = clients.get(&curr) {
+                        let mut clients = active_clients_press.lock().unwrap();
+                        if let Some(c) = clients.get_mut(&curr) {
                             if let Some(udp) = udp_server_press.lock().unwrap().as_ref() {
                                 if let Some(addr) = c.udp_addr {
-                                    let s_data = settings_press.lock().unwrap().clone();
+                                    c.udp_seq += 1;
+                                    let seq = c.udp_seq;
                                     let _ = udp.send_event(
                                         &InputEvent::KeyPress { key, pressed: true },
                                         addr,
-                                        &s_data,
+                                        &c.cryptor,
+                                        seq,
                                     );
                                 }
                             }
@@ -509,22 +521,23 @@ impl AppEngine {
                     let udp_server_release = udp_server.clone();
                     let active_clients_release = active_clients.clone();
                     let current_controlled_release = current_controlled.clone();
-                    let settings_release = settings.clone();
 
                     let on_release = move |key: String| {
                         let curr = current_controlled_release.lock().unwrap().clone();
-                        let clients = active_clients_release.lock().unwrap();
-                        if let Some(c) = clients.get(&curr) {
+                        let mut clients = active_clients_release.lock().unwrap();
+                        if let Some(c) = clients.get_mut(&curr) {
                             if let Some(udp) = udp_server_release.lock().unwrap().as_ref() {
                                 if let Some(addr) = c.udp_addr {
-                                    let s_data = settings_release.lock().unwrap().clone();
+                                    c.udp_seq += 1;
+                                    let seq = c.udp_seq;
                                     let _ = udp.send_event(
                                         &InputEvent::KeyPress {
                                             key,
                                             pressed: false,
                                         },
                                         addr,
-                                        &s_data,
+                                        &c.cryptor,
+                                        seq,
                                     );
                                 }
                             }
@@ -547,7 +560,6 @@ impl AppEngine {
         let is_running = self.is_running.clone();
         let clipboard_history = self.clipboard_history.clone();
         let tcp_server = self.tcp_server.clone();
-        let settings = self.settings.clone();
 
         thread::spawn(move || {
             let mut recent_value = String::new();
@@ -573,30 +585,21 @@ impl AppEngine {
                     };
 
                     if !is_from_network {
-                        log::info!("Server: Local clipboard changed; broadcasting update");
-                        let payload =
-                            if data.contains('\n') && (data.contains('/') || data.contains('\\')) {
-                                if let Some(file_payload) = format_clipboard_data(&data) {
-                                    file_payload
-                                } else {
-                                    ClipboardPayload::Text { text: data }
-                                }
-                            } else {
-                                ClipboardPayload::Text { text: data }
-                            };
-
-                        let s_data = {
-                            let s = settings.lock().unwrap();
-                            s.clone()
+                        log::info!("Server: Local clipboard updated, broadcasting...");
+                        let payload = if data.starts_with("file://") || data.starts_with('/') {
+                            format_clipboard_data(&data)
+                        } else {
+                            Some(ClipboardPayload::Text { text: data })
                         };
-                        tcp_server.broadcast_clipboard(&payload, None, &s_data);
+
+                        if let Some(p) = payload {
+                            tcp_server.broadcast_clipboard(&p, None);
+                        }
                     }
                 }
             }
         });
     }
-
-    // --- Client Mode ---
 
     fn start_client(&self, settings: SettingsData) {
         log::info!("Starting Client Mode");
@@ -604,16 +607,15 @@ impl AppEngine {
         let server_ip = settings.ip.clone();
         let is_connected = self.is_connected.clone();
         let udp_client = self.udp_client.clone();
-        let settings_clone = settings.clone();
 
-        let on_connect = move || {
+        let on_connect = move |key: [u8; 32], salt: [u8; 4]| {
             log::info!("Client: Connected to server");
             {
                 let mut conn = is_connected.lock().unwrap();
                 *conn = true;
             }
 
-            let _ = udp_client.start(&server_ip, settings_clone.clone());
+            let _ = udp_client.start(&server_ip, key, salt);
         };
 
         let is_connected_disc = self.is_connected.clone();
@@ -653,11 +655,13 @@ impl AppEngine {
 
         let tcp_client = self.tcp_client.clone();
         let ip = settings.ip.clone();
+        let pending_trusts = self.pending_trusts.clone();
 
         thread::spawn(move || {
             if let Err(e) = tcp_client.connect(
                 &ip,
                 settings.clone(),
+                pending_trusts,
                 on_connect,
                 on_disconnect,
                 on_clipboard_recv,
@@ -673,7 +677,6 @@ impl AppEngine {
         let is_running = self.is_running.clone();
         let clipboard_history = self.clipboard_history.clone();
         let tcp_client = self.tcp_client.clone();
-        let settings = self.settings.clone();
 
         thread::spawn(move || {
             let mut recent_value = String::new();
@@ -699,23 +702,16 @@ impl AppEngine {
                     };
 
                     if !is_from_network {
-                        log::info!("Client: Local clipboard changed; sending to server");
-                        let payload =
-                            if data.contains('\n') && (data.contains('/') || data.contains('\\')) {
-                                if let Some(file_payload) = format_clipboard_data(&data) {
-                                    file_payload
-                                } else {
-                                    ClipboardPayload::Text { text: data }
-                                }
-                            } else {
-                                ClipboardPayload::Text { text: data }
-                            };
-
-                        let s_data = {
-                            let s = settings.lock().unwrap();
-                            s.clone()
+                        log::info!("Client: Local clipboard updated, sending to server...");
+                        let payload = if data.starts_with("file://") || data.starts_with('/') {
+                            format_clipboard_data(&data)
+                        } else {
+                            Some(ClipboardPayload::Text { text: data })
                         };
-                        let _ = tcp_client.send_clipboard(&payload, &s_data);
+
+                        if let Some(p) = payload {
+                            let _ = tcp_client.send_clipboard(&p);
+                        }
                     }
                 }
             }
@@ -733,7 +729,6 @@ pub fn handle_client_edge_transition(
     current_controlled: &Arc<Mutex<String>>,
     active_clients: &Arc<Mutex<HashMap<String, ClientInfo>>>,
     udp_server: &Arc<Mutex<Option<UdpServer>>>,
-    settings: &Arc<Mutex<SettingsData>>,
 ) {
     let server_metrics = get_screeninfo();
 
@@ -761,12 +756,13 @@ pub fn handle_client_edge_transition(
 
         let old_client = current_controlled.lock().unwrap().clone();
         {
-            let clients = active_clients.lock().unwrap();
-            if let Some(c) = clients.get(&old_client) {
+            let mut clients = active_clients.lock().unwrap();
+            if let Some(c) = clients.get_mut(&old_client) {
                 if let Some(udp) = udp_server.lock().unwrap().as_ref() {
                     if let Some(addr) = c.udp_addr {
-                        let s_data = settings.lock().unwrap().clone();
-                        let _ = udp.send_event(&InputEvent::Stop, addr, &s_data);
+                        c.udp_seq += 1;
+                        let seq = c.udp_seq;
+                        let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, seq);
                     }
                 }
             }
@@ -780,7 +776,7 @@ pub fn handle_client_edge_transition(
         let mouse = MouseController::new();
         mouse.set_position(enter_pos);
     } else {
-        let clients = active_clients.lock().unwrap();
+        let mut clients = active_clients.lock().unwrap();
         if let Some(next_client) = clients.get(target) {
             log::info!(
                 "Edge reached on Client! Transferring control directly to client: {}",
@@ -801,27 +797,25 @@ pub fn handle_client_edge_transition(
             };
 
             let old_client = current_controlled.lock().unwrap().clone();
-            if let Some(c) = clients.get(&old_client) {
+            if let Some(c) = clients.get_mut(&old_client) {
                 if let Some(udp) = udp_server.lock().unwrap().as_ref() {
                     if let Some(addr) = c.udp_addr {
-                        let s_data = settings.lock().unwrap().clone();
-                        let _ = udp.send_event(&InputEvent::Stop, addr, &s_data);
+                        c.udp_seq += 1;
+                        let seq = c.udp_seq;
+                        let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, seq);
                     }
                 }
+            }
+
+            if let Some(c) = clients.get_mut(target) {
+                c.mouse_x = enter_pos.0;
+                c.mouse_y = enter_pos.1;
             }
 
             drop(clients);
             {
                 let mut curr = current_controlled.lock().unwrap();
                 *curr = target.to_string();
-            }
-
-            {
-                let mut clients = active_clients.lock().unwrap();
-                if let Some(c) = clients.get_mut(target) {
-                    c.mouse_x = enter_pos.0;
-                    c.mouse_y = enter_pos.1;
-                }
             }
         } else {
             log::warn!("Edge transition target client {} not found in active clients list", target);

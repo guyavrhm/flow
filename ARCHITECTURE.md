@@ -37,10 +37,11 @@ graph TD
   * **[tcp.rs](src/network/tcp.rs):** Manages connection handshakes, screen metrics exchange, and clipboard synchronization.
   * **[udp.rs](src/network/udp.rs):** Runs the low-latency network pipeline for high-frequency input events.
   * **[protocol.rs](src/network/protocol.rs):** Defines network serialization structs (`InputEvent`, `ClipboardPayload`, `ScreenMetrics`).
+  * **[tls.rs](src/network/tls.rs):** Custom Trust-On-First-Use (TOFU) mutual TLS verifiers (`TofuServerVerifier` and `TofuClientVerifier`) and PEM loading helpers.
 * **[src/hardware/](src/hardware/):** Hardware input capture and simulation stack:
   * **[mod.rs](src/hardware/mod.rs):** Manages conditional compilation (`#[cfg(target_os)]`) to dynamically select and export the correct OS-specific FFI backend at build time.
   * **Platform Backends:** Platform-specific FFI modules (`mac.rs`, `win.rs`, `linux.rs`) implementing OS-specific hooks and input injection.
-* **[src/crypto.rs](src/crypto.rs):** A safe, pure-Rust implementation of Rijndael AES-128 block cipher in ECB mode to maintain compatibility with the Python C-module legacy.
+* **[src/crypto.rs](src/crypto.rs):** Handles self-signed X.509 certificate generation/loading, SHA-256 fingerprint computation, sliding window replay protection for UDP packets, and symmetric ChaCha20-Poly1305 encryption/decryption.
 * **[src/config.rs](src/config.rs):** SQLite database layer (`rusqlite`) for saving settings and screen-arrangement layout mapping.
 * **[src/ui/](src/ui/):** Immediate-mode UI layout modules:
   * **[src/ui/mod.rs](src/ui/mod.rs):** Coordinates the desktop configurations view, polls background status variables, manages tray menu interactions, and executes async engine reloads when settings are saved.
@@ -59,70 +60,85 @@ sequenceDiagram
     participant ClientA as Client A (Active Guest)
     participant ClientB as Client B (Inactive Guest)
 
-    Note over ClientA, Server: Connection & Handshake (Client A)
-    ClientA->>Server: TCP Connection (Port 8118)
-    Server-->>ClientA: Handshake Verification & AES Check
-    ClientA->>Server: Send ScreenMetrics (JSON over TCP)
-    ClientA->>Server: UDP Handshake Packet (Dynamic UDP Port)
-    Note over Server: Server stores Client A IP, Resolution, & UDP Address
-
-    Note over ClientB, Server: Connection & Handshake (Client B)
+    Note over ClientA, Server: TLS 1.3 Handshake (Client A)
+    ClientA->>Server: TCP Connection (Port 8118) + ClientHello
+    Server-->>ClientA: ServerHello + Self-Signed X.509 Certificate
+    Note over ClientA: Calculates SHA-256 Fingerprint
+    Note over ClientA: Checks SQLite DB (TOFU). Prompts user if new.
+    ClientA-->>Server: Client Certificate (mTLS)
+    Note over Server: Calculates Client Certificate Fingerprint
+    Note over Server: Checks SQLite DB (TOFU). Prompts user if new.
+    
+    Note over Server: Server generates 32-byte Key & 4-byte Salt
+    Server->>ClientA: UdpSessionConfig (JSON over TLS TCP)
+    ClientA->>Server: Send ScreenMetrics (JSON over TLS TCP)
+    
+    Note over ClientA, Server: UDP Handshake
+    ClientA->>Server: UDP packet with "." encrypted with Key/Salt (Seq 0)
+    Note over Server: Decrypts with Client Cryptor, registers client UDP Port
+    
+    Note over ClientB, Server: TLS 1.3 Handshake & Handshake (Client B)
 
     Note over ClientA, Server: Input Redirection Flow (Mouse reaches edge)
     Note over Server: Install Input Hooks (Swallow local inputs)
     loop Every Move/Click/Scroll/Keypress
-        Server->>ClientA: Send InputEvent (UDP)
-        Note over ClientA: Inject event into Native OS
+        Note over Server: Increment sequence number (nonce counter)
+        Server->>ClientA: Send InputEvent (UDP: [8-byte seq] [ChaCha20-Poly1305 payload])
+        Note over ClientA: Verify seq (sliding window) & decrypt. Inject event.
     end
 
     Note over Server: Virtual cursor reaches client edge to return
     Server->>ClientA: Send InputEvent::Stop (UDP)
     Note over Server: Uninstall Input Hooks (Resume local inputs)
 
-    Note over ClientB, Server: Clipboard Sharing, All sides poll local clipboard (1s)
-    ClientB->>Server: Send ClipboardPayload (TCP)
+    Note over ClientB, Server: Clipboard Sharing (All sides poll local clipboard every 1s)
+    ClientB->>Server: Send ClipboardPayload (TLS TCP)
     Note over Server: Writes Text/Files to local Clipboard
-    Server->>ClientA: Broadcast ClipboardPayload (TCP)
+    Server->>ClientA: Broadcast ClipboardPayload (TLS TCP)
     Note over ClientA: Writes Text/Files to local Clipboard
 ```
 
----
-
 ## 4. Communication Protocol
 
-`flow` encrypts all communications (both TCP and UDP) using AES-128-ECB, with the key derived from the user-configured password (see [src/crypto.rs](file:///Users/guyavraham/flow/src/crypto.rs)).
+`flow` encrypts all control traffic using **TLS 1.3** and real-time input events using **ChaCha20-Poly1305 AEAD**. Trust is validated using a **Trust on First Use (TOFU)** model checking self-signed certificate fingerprints against a SQLite database store (see [src/crypto.rs](file:///Users/guyavraham/flow/src/crypto.rs)).
 
 ### 4.1 TCP Control Channel (Port 8118)
 
-TCP is used for connection establishment, capability exchange, and clipboard synchronization.
+TCP is used for connection establishment, capability exchange, and clipboard synchronization, entirely wrapped in TLS 1.3.
 
-#### TCP Frame Format (Encryption Envelope)
-Each TCP message is transmitted as an encrypted payload prefixed with a fixed-size length header:
-* **Length Header**: 10-byte ASCII, zero-padded integer representing the length of the encrypted ciphertext (e.g., `0000000016`).
-* **Encrypted Payload**: The ciphertext encrypted via AES-128-ECB.
+#### TCP Frame Format (Message Framing)
+To demarcate JSON payloads sent over the stream, each message is transmitted with a length prefix:
+* **Length Header**: 10-byte ASCII, zero-padded integer representing the length of the plaintext payload (e.g., `0000000084`).
+* **Plaintext Payload**: The raw JSON payload (e.g. `UdpSessionConfig`, `ScreenMetrics`, or `ClipboardPayload`).
 
 #### Connection & Handshake Flow
-1. **TCP Handshake**:
-   * The client connects to the server's TCP port `8118`.
-   * The client sends a frame containing a single byte `.` encrypted.
-   * The server decrypts it, validates the `.` payload, and responds with a single byte `.` encrypted.
-   * If validation succeeds on both sides, the handshake is completed.
-2. **Screen Metrics Exchange**:
-   * Right after the handshake, the client sends its screen dimensions serialized as JSON in `ScreenMetrics` format (e.g., `{"width": 1920, "height": 1080}`).
-3. **Control & Clipboard Channel**:
-   * The connection remains open. When a clipboard change is detected on either client or server, a `ClipboardPayload` is serialized to JSON, encrypted, and transmitted.
+1. **TLS Handshake & mTLS TOFU**:
+   * The client connects to port `8118` and starts the TLS 1.3 handshake.
+   * Both sides exchange self-signed certificates and calculate their SHA-256 fingerprints.
+   * If a fingerprint is not found in the local SQLite table `known_hosts`, the handshake thread blocks, and a modal displays in the `egui` GUI requesting user confirmation. If accepted, the fingerprint is saved to the DB.
+2. **UDP Session Key Configuration**:
+   * Immediately after TLS is established, the Server generates a random 32-byte key and 4-byte salt, serializing them into a `UdpSessionConfig` message sent to the client.
+3. **Screen Metrics Exchange**:
+   * The client responds by sending its screen dimensions serialized as JSON in `ScreenMetrics` format.
+4. **Control & Clipboard Channel**:
+   * When a clipboard change is detected on either client or server, a `ClipboardPayload` is serialized to JSON and transmitted over the TLS stream.
 
 ### 4.2 UDP Input Channel (Port 8118)
 
-UDP is used for low-latency transmission of high-frequency input events (mouse move, clicks, scroll, and keystrokes).
+UDP is used for low-latency transmission of high-frequency input events.
 
 #### UDP Handshake
 To bind client/server UDP sockets:
-* The client sends a UDP packet containing a single byte `.` encrypted via AES-128-ECB to the server's port `8118`.
-* The server decrypts and verifies the packet to register the client's public UDP socket endpoint (`SocketAddr`).
+* The client sends a UDP packet containing a handshake signature: the character `.` encrypted with `UdpCryptor` at sequence number `0`.
+* The server decrypts and verifies the packet using the client's cryptor to register the client's public UDP socket endpoint (`SocketAddr`).
 
 #### Input Event Payload Format
-All input events are sent as encrypted raw strings. Once decrypted, the payload follows a space-delimited text protocol:
+All input events are sent as secure UDP packets:
+* **Sequence Header**: 8-byte big-endian unsigned 64-bit integer (`u64`). Used directly to construct the 12-byte cryptographic nonce: `[4-byte salt] [8-byte sequence]`.
+* **Ciphertext**: ChaCha20-Poly1305 encrypted space-delimited text event payload.
+* **Anti-Replay**: The receiver validates incoming sequence numbers using a **64-packet sliding window bitmask** to discard duplicate or delayed packets.
+
+Once decrypted, the payload follows a space-delimited text protocol:
 
 | Format / Event | Description | Example |
 |---|---|---|

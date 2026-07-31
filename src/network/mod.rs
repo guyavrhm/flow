@@ -1,6 +1,7 @@
 pub mod protocol;
 pub mod tcp;
 pub mod udp;
+pub mod tls;
 
 pub fn get_local_ip() -> String {
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {

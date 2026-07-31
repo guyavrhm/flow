@@ -1,10 +1,12 @@
 use crate::config::{ScreenAttachments, SettingsData, get_attachments};
-use crate::crypto::CryptoKey;
-use crate::network::protocol::{ClipboardPayload, ScreenMetrics, true_recv, true_send};
+use crate::network::protocol::{ClipboardPayload, ScreenMetrics, UdpSessionConfig, true_recv, true_send};
+use crate::network::tls::{PendingTrustRequest, TofuClientVerifier, TofuServerVerifier, load_certs_and_key};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use rand::Rng;
+use rustls::{ServerConfig, ClientConfig};
 
 pub struct TcpServer {
     pub(crate) running: Arc<Mutex<bool>>,
@@ -14,7 +16,7 @@ pub struct TcpServer {
 pub struct TcpClientInfo {
     pub ip: String,
     pub metrics: ScreenMetrics,
-    pub stream: TcpStream,
+    pub stream: Arc<Mutex<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>>,
     pub attachments: ScreenAttachments,
 }
 
@@ -29,12 +31,13 @@ impl TcpServer {
     pub fn start<FConn, FDisconn, FClip>(
         &self,
         settings: SettingsData,
+        pending_trusts: Arc<Mutex<Vec<PendingTrustRequest>>>,
         on_connect: FConn,
         on_disconnect: FDisconn,
         on_clipboard_recv: FClip,
     ) -> std::io::Result<()>
     where
-        FConn: Fn(String, ScreenMetrics) + Send + Sync + 'static,
+        FConn: Fn(String, ScreenMetrics, crate::crypto::UdpCryptor) + Send + Sync + 'static,
         FDisconn: Fn(String) + Send + Sync + 'static,
         FClip: Fn(ClipboardPayload, String) + Send + Sync + 'static,
     {
@@ -49,9 +52,10 @@ impl TcpServer {
             *r = true;
         }
 
-        let clients_clone = self.clients.clone();
-        let key = Arc::new(CryptoKey::new(&settings.password));
+        // Install the ring provider as process default if not already done
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
+        let clients_clone = self.clients.clone();
         let on_connect = Arc::new(on_connect);
         let on_disconnect = Arc::new(on_disconnect);
         let on_clipboard_recv = Arc::new(on_clipboard_recv);
@@ -66,12 +70,13 @@ impl TcpServer {
                 }
 
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
+                    Ok((stream, _)) => {
                         let clients_inner = clients_clone.clone();
-                        let key_inner = key.clone();
                         let on_conn = on_connect.clone();
                         let on_disc = on_disconnect.clone();
                         let on_clip = on_clipboard_recv.clone();
+                        let pending_trusts_inner = pending_trusts.clone();
+                        let running_inner = running.clone();
 
                         thread::spawn(move || {
                             let ip = match stream.peer_addr() {
@@ -91,47 +96,82 @@ impl TcpServer {
                                 .set_write_timeout(Some(Duration::from_secs(5)))
                                 .unwrap();
 
-                            match true_recv(&mut stream, &key_inner) {
-                                Ok(bytes) => {
-                                    if bytes != b"." {
-                                        log::warn!(
-                                            "TCP Handshake failed for client {}: mismatch payload",
-                                            ip
-                                        );
-                                        return;
-                                    }
-                                }
+                            // Load server's self-signed cert and key
+                            let (cert_pem, key_pem) = match crate::crypto::load_or_generate_cert(crate::paths::get_app_dir()) {
+                                Ok(pair) => pair,
                                 Err(e) => {
-                                    log::error!(
-                                        "TCP Handshake failed for client {}: decryption error {:?}",
-                                        ip, e
-                                    );
+                                    log::error!("TCP Server: Failed to load/generate cert: {:?}", e);
                                     return;
                                 }
-                            }
+                            };
+                            let (certs, private_key) = load_certs_and_key(&cert_pem, &key_pem);
 
-                            if true_send(&mut stream, b".", &key_inner).is_err() {
-                                log::warn!("TCP Handshake failed: could not send response to {}", ip);
+                            // Build server config dynamically using client's IP to support mTLS TOFU verification
+                            let client_verifier = Arc::new(TofuClientVerifier::new(ip.clone(), pending_trusts_inner));
+                            let server_config = match ServerConfig::builder()
+                                .with_client_cert_verifier(client_verifier)
+                                .with_single_cert(certs, private_key)
+                            {
+                                Ok(cfg) => cfg,
+                                Err(e) => {
+                                    log::error!("TCP Server: Failed to build ServerConfig: {:?}", e);
+                                    return;
+                                }
+                            };
+
+                            // Establish TLS Server session
+                            let conn = match rustls::ServerConnection::new(Arc::new(server_config)) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    log::error!("TCP Server: Failed to create ServerConnection: {:?}", e);
+                                    return;
+                                }
+                            };
+
+                            let mut stream_owned = rustls::StreamOwned::new(conn, stream);
+
+                            // Generate ephemeral key & salt for UDP events encryption
+                            let mut udp_key = [0u8; 32];
+                            let mut udp_salt = [0u8; 4];
+                            rand::thread_rng().fill(&mut udp_key);
+                            rand::thread_rng().fill(&mut udp_salt);
+
+                            let cryptor = crate::crypto::UdpCryptor::new(&udp_key, udp_salt);
+
+                            // Send UDP session key config to client over TLS
+                            let session_config = UdpSessionConfig {
+                                key: udp_key,
+                                salt: udp_salt,
+                            };
+                            let config_bytes = serde_json::to_vec(&session_config).unwrap();
+                            if let Err(e) = true_send(&mut stream_owned, &config_bytes) {
+                                log::warn!("TCP Server: Failed to send UDP session config to {}: {:?}", ip, e);
                                 return;
                             }
 
-                            // Handshake succeeded, clear timeouts
-                            stream.set_read_timeout(None).unwrap();
-                            stream.set_write_timeout(None).unwrap();
-
-                            // Receive screen metrics
-                            let metrics_bytes = match true_recv(&mut stream, &key_inner) {
+                            // Receive client's ScreenMetrics
+                            let metrics_bytes = match true_recv(&mut stream_owned) {
                                 Ok(b) => b,
-                                Err(_) => return,
+                                Err(e) => {
+                                    log::warn!("TCP Server: Failed to receive metrics from {}: {:?}", ip, e);
+                                    return;
+                                }
                             };
 
-                            let metrics: ScreenMetrics =
-                                match serde_json::from_slice(&metrics_bytes) {
-                                    Ok(m) => m,
-                                    Err(_) => return,
-                                };
+                            let metrics: ScreenMetrics = match serde_json::from_slice(&metrics_bytes) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    log::warn!("TCP Server: Failed to parse metrics from {}: {:?}", ip, e);
+                                    return;
+                                }
+                            };
 
-                            log::debug!("TCP: Client {} metrics: {:?}", ip, metrics);
+                            // Handshake succeeded. Set a short read timeout (100ms) on the stream
+                            // to support concurrent locking for reads & writes.
+                            stream_owned.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+                            stream_owned.get_mut().set_write_timeout(None).unwrap();
+
+                            log::info!("TCP Server: Client {} authenticated & verified", ip);
 
                             // Load attachments
                             let attachments =
@@ -143,10 +183,12 @@ impl TcpServer {
                                     left: None,
                                 });
 
+                            let stream_owned_arc = Arc::new(Mutex::new(stream_owned));
+
                             let client_info = Arc::new(Mutex::new(TcpClientInfo {
                                 ip: ip.clone(),
                                 metrics: metrics.clone(),
-                                stream: stream.try_clone().unwrap(),
+                                stream: stream_owned_arc.clone(),
                                 attachments,
                             }));
 
@@ -155,10 +197,18 @@ impl TcpServer {
                                 list.push(client_info.clone());
                             }
 
-                            on_conn(ip.clone(), metrics);
+                            on_conn(ip.clone(), metrics, cryptor);
 
                             loop {
-                                match true_recv(&mut stream, &key_inner) {
+                                {
+                                    let r = running_inner.lock().unwrap();
+                                    if !*r {
+                                        break;
+                                    }
+                                }
+
+                                let mut s_lock = stream_owned_arc.lock().unwrap();
+                                match true_recv(&mut *s_lock) {
                                     Ok(payload_bytes) => {
                                         if payload_bytes.is_empty() {
                                             log::debug!("TCP Server: Received empty payload (EOF) from {}", ip);
@@ -170,8 +220,13 @@ impl TcpServer {
                                                 &payload_bytes,
                                             )
                                         {
+                                            drop(s_lock); // Drop lock before invoking callback
                                             on_clip(payload, ip.clone());
                                         }
+                                    }
+                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                                        drop(s_lock);
+                                        thread::sleep(Duration::from_millis(10));
                                     }
                                     Err(e) => {
                                         log::debug!("TCP Server: Read error from {}: {:?}", ip, e);
@@ -214,7 +269,8 @@ impl TcpServer {
         let mut clients = self.clients.lock().unwrap();
         for client in clients.iter() {
             let lock = client.lock().unwrap();
-            let _ = lock.stream.shutdown(std::net::Shutdown::Both);
+            let mut s = lock.stream.lock().unwrap();
+            let _ = s.get_mut().shutdown(std::net::Shutdown::Both);
         }
         clients.clear();
     }
@@ -223,28 +279,27 @@ impl TcpServer {
         &self,
         payload: &ClipboardPayload,
         exclude_ip: Option<&str>,
-        settings: &SettingsData,
     ) {
         log::debug!("TCP: Broadcasting clipboard (excluding client: {:?})", exclude_ip);
         let payload_bytes = serde_json::to_vec(payload).unwrap();
-        let key = CryptoKey::new(&settings.password);
 
         let clients = self.clients.lock().unwrap();
         for client in clients.iter() {
-            let mut c = client.lock().unwrap();
+            let c = client.lock().unwrap();
             if let Some(exclude) = exclude_ip {
                 if c.ip == exclude {
                     continue;
                 }
             }
-            let _ = true_send(&mut c.stream, &payload_bytes, &key);
+            let mut s = c.stream.lock().unwrap();
+            let _ = true_send(&mut *s, &payload_bytes);
         }
     }
 }
 
 pub struct TcpClient {
     running: Arc<Mutex<bool>>,
-    stream: Arc<Mutex<Option<TcpStream>>>,
+    stream: Arc<Mutex<Option<Arc<Mutex<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>>>>>,
 }
 
 impl TcpClient {
@@ -258,58 +313,83 @@ impl TcpClient {
     pub fn connect<FConn, FDisconn, FClip>(
         &self,
         server_ip: &str,
-        settings: SettingsData,
+        _settings: SettingsData,
+        pending_trusts: Arc<Mutex<Vec<PendingTrustRequest>>>,
         on_connect: FConn,
         on_disconnect: FDisconn,
         on_clipboard_recv: FClip,
     ) -> std::io::Result<()>
     where
-        FConn: Fn() + Send + Sync + 'static,
+        FConn: Fn([u8; 32], [u8; 4]) + Send + Sync + 'static,
         FDisconn: Fn() + Send + Sync + 'static,
         FClip: Fn(ClipboardPayload) + Send + Sync + 'static,
     {
         let server_addr = format!("{}:8118", server_ip);
         log::info!("TCP Client connecting to {}...", server_addr);
 
-        let mut stream =
+        let stream =
             TcpStream::connect_timeout(&server_addr.parse().unwrap(), Duration::from_secs(5))?;
 
-        let key = CryptoKey::new(&settings.password);
+        // Install the ring provider as process default if not already done
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
-        // Handshake: send '.' and receive '.'
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        // Load client's self-signed cert and key
+        let (cert_pem, key_pem) = match crate::crypto::load_or_generate_cert(crate::paths::get_app_dir()) {
+            Ok(pair) => pair,
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        };
+        let (certs, private_key) = load_certs_and_key(&cert_pem, &key_pem);
 
-        true_send(&mut stream, b".", &key)?;
-        let response = true_recv(&mut stream, &key)?;
-        if response != b"." {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "Handshake mismatch",
-            ));
-        }
+        // Build client configuration with custom TOFU server verifier and client certificate for mTLS
+        let server_verifier = Arc::new(TofuServerVerifier::new(server_ip.to_string(), pending_trusts));
+        let client_config = match ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(server_verifier)
+            .with_client_auth_cert(certs, private_key)
+        {
+            Ok(cfg) => cfg,
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        };
 
-        // Handshake succeeded
-        stream.set_read_timeout(None).unwrap();
-        stream.set_write_timeout(None).unwrap();
-        log::info!("TCP Client connected & authenticated");
+        let server_name = match rustls_pki_types::ServerName::try_from(server_ip.to_string()) {
+            Ok(name) => name.to_owned(),
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())),
+        };
 
-        // Send screen metrics
+        let conn = match rustls::ClientConnection::new(Arc::new(client_config), server_name) {
+            Ok(c) => c,
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        };
+
+        let mut stream_owned = rustls::StreamOwned::new(conn, stream);
+
+        stream_owned.get_mut().set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream_owned.get_mut().set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+
+        // Receive UDP session key config from server over TLS
+        let session_bytes = true_recv(&mut stream_owned)?;
+        let session_config: UdpSessionConfig = serde_json::from_slice(&session_bytes)?;
+
+        // Send screen metrics to server
         let screen = crate::hardware::get_screeninfo();
         let metrics = ScreenMetrics {
             width: screen.0,
             height: screen.1,
         };
         let metrics_bytes = serde_json::to_vec(&metrics).unwrap();
-        true_send(&mut stream, &metrics_bytes, &key)?;
+        true_send(&mut stream_owned, &metrics_bytes)?;
+
+        // Handshake succeeded. Set a short read timeout (100ms) on client socket
+        // to support cooperative concurrent locking for reads & writes.
+        stream_owned.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        stream_owned.get_mut().set_write_timeout(None).unwrap();
+        log::info!("TCP Client connected & authenticated via TLS");
+
+        let stream_owned_arc = Arc::new(Mutex::new(stream_owned));
 
         {
             let mut s_lock = self.stream.lock().unwrap();
-            *s_lock = Some(stream.try_clone().unwrap());
+            *s_lock = Some(stream_owned_arc.clone());
         }
 
         let running = self.running.clone();
@@ -321,16 +401,13 @@ impl TcpClient {
         let on_connect = Arc::new(on_connect);
         let on_disconnect = Arc::new(on_disconnect);
         let on_clipboard_recv = Arc::new(on_clipboard_recv);
-        let stream_for_read = stream.try_clone().unwrap();
 
-        on_connect();
+        on_connect(session_config.key, session_config.salt);
 
         let running_clone = running.clone();
-        let key_arc = Arc::new(key);
         let stream_clone = self.stream.clone();
 
         thread::spawn(move || {
-            let mut s = stream_for_read;
             loop {
                 {
                     let r = running_clone.lock().unwrap();
@@ -339,23 +416,39 @@ impl TcpClient {
                     }
                 }
 
-                match true_recv(&mut s, &key_arc) {
-                    Ok(payload_bytes) => {
-                        if payload_bytes.is_empty() {
-                            log::debug!("TCP Client: Received empty payload (EOF) from server");
+                let stream_opt = {
+                    let s_lock = stream_clone.lock().unwrap();
+                    s_lock.clone()
+                };
+
+                if let Some(s_arc) = stream_opt {
+                    let mut s = s_arc.lock().unwrap();
+                    match true_recv(&mut *s) {
+                        Ok(payload_bytes) => {
+                            if payload_bytes.is_empty() {
+                                log::debug!("TCP Client: Received empty payload (EOF) from server");
+                                break;
+                            }
+                            log::debug!("TCP Client: Received clipboard payload bytes from server");
+                            // Drop lock before calling callback to avoid deadlocks
+                            drop(s);
+                            if let Ok(payload) =
+                                serde_json::from_slice::<ClipboardPayload>(&payload_bytes)
+                            {
+                                on_clipboard_recv(payload);
+                            }
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                            drop(s);
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => {
+                            log::debug!("TCP Client: Read error: {:?}", e);
                             break;
                         }
-                        log::debug!("TCP Client: Received clipboard payload bytes from server");
-                        if let Ok(payload) =
-                            serde_json::from_slice::<ClipboardPayload>(&payload_bytes)
-                        {
-                            on_clipboard_recv(payload);
-                        }
                     }
-                    Err(e) => {
-                        log::debug!("TCP Client: Read error: {:?}", e);
-                        break;
-                    }
+                } else {
+                    break;
                 }
             }
 
@@ -376,14 +469,16 @@ impl TcpClient {
     pub fn send_clipboard(
         &self,
         payload: &ClipboardPayload,
-        settings: &SettingsData,
     ) -> std::io::Result<()> {
         log::debug!("TCP Client: Sending clipboard payload to server");
-        let mut s_lock = self.stream.lock().unwrap();
-        if let Some(ref mut s) = *s_lock {
+        let s_opt = {
+            let s_lock = self.stream.lock().unwrap();
+            s_lock.clone()
+        };
+        if let Some(s_arc) = s_opt {
+            let mut s = s_arc.lock().unwrap();
             let payload_bytes = serde_json::to_vec(payload).unwrap();
-            let key = CryptoKey::new(&settings.password);
-            true_send(s, &payload_bytes, &key)?;
+            true_send(&mut *s, &payload_bytes)?;
         }
         Ok(())
     }
@@ -392,10 +487,13 @@ impl TcpClient {
         log::info!("Stopping TCP Client");
         let mut r = self.running.lock().unwrap();
         *r = false;
-        let mut s_lock = self.stream.lock().unwrap();
-        if let Some(ref s) = *s_lock {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+        let s_opt = {
+            let mut s_lock = self.stream.lock().unwrap();
+            s_lock.take()
+        };
+        if let Some(s_arc) = s_opt {
+            let mut s = s_arc.lock().unwrap();
+            let _ = s.get_mut().shutdown(std::net::Shutdown::Both);
         }
-        *s_lock = None;
     }
 }

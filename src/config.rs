@@ -74,8 +74,49 @@ pub fn initialize_db() -> Result<()> {
         )?;
     }
 
+    // Create known_hosts table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS known_hosts (
+            address TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            trusted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )?;
+
     Ok(())
 }
+
+pub fn get_trusted_fingerprint(address: &str) -> Result<Option<String>> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path)?;
+    let mut stmt = conn.prepare("SELECT fingerprint FROM known_hosts WHERE address = ?")?;
+    let mut rows = stmt.query(params![address])?;
+    if let Some(row) = rows.next()? {
+        let fp: String = row.get(0)?;
+        Ok(Some(fp))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn trust_fingerprint(address: &str, fingerprint: &str) -> Result<()> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO known_hosts (address, fingerprint) VALUES (?, ?)",
+        params![address, fingerprint],
+    )?;
+    Ok(())
+}
+
+pub fn untrust_fingerprint(address: &str) -> Result<()> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path)?;
+    conn.execute("DELETE FROM known_hosts WHERE address = ?", params![address])?;
+    Ok(())
+}
+
 
 pub fn get_settings() -> Result<SettingsData> {
     let db_path = get_db_path();

@@ -2,7 +2,7 @@ pub mod canvas;
 pub mod tray;
 
 use crate::config::{
-    ENCRYPTION_OFF, ENCRYPTION_ON, PC_CLIENT, PC_SERVER, SettingsData, get_settings, remove_screen,
+    ENCRYPTION_OFF, PC_CLIENT, PC_SERVER, SettingsData, get_settings, remove_screen,
     save_settings, update_screen,
 };
 use crate::engine::AppEngine;
@@ -22,6 +22,7 @@ pub struct FlowApp {
     show_window: bool,
     show_trash_list: bool,
     status_msg: String,
+    local_fingerprint: String,
 }
 
 impl FlowApp {
@@ -46,6 +47,17 @@ impl FlowApp {
         let mut canvas = ScreenLayoutCanvas::new();
         canvas.load_from_db(&Vec::new());
 
+        let local_fingerprint = if let Ok((cert_pem, key_pem)) = crate::crypto::load_or_generate_cert(crate::paths::get_app_dir()) {
+            let (certs, _) = crate::network::tls::load_certs_and_key(&cert_pem, &key_pem);
+            if !certs.is_empty() {
+                crate::crypto::compute_fingerprint(certs[0].as_ref())
+            } else {
+                "No certificate available".to_string()
+            }
+        } else {
+            "Failed to load certs".to_string()
+        };
+
         Self {
             settings: initial_settings,
             canvas,
@@ -54,6 +66,7 @@ impl FlowApp {
             show_window: true,
             show_trash_list: false,
             status_msg: "".to_string(),
+            local_fingerprint,
         }
     }
 
@@ -150,26 +163,16 @@ impl eframe::App for FlowApp {
 
                     ui.add_space(10.0);
 
-                    // Encryption settings
+                    // Local certificate fingerprint
                     ui.group(|ui| {
-                        let mut encrypt_bool = self.settings.encryption == ENCRYPTION_ON;
-                        if ui
-                            .checkbox(&mut encrypt_bool, "Enable Encryption")
-                            .changed()
-                        {
-                            self.settings.encryption = if encrypt_bool {
-                                ENCRYPTION_ON
-                            } else {
-                                ENCRYPTION_OFF
-                            };
-                        }
-
-                        if self.settings.encryption == ENCRYPTION_ON {
-                            ui.label("Password:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.settings.password)
-                                    .password(true),
-                            );
+                        ui.label("Local Certificate Fingerprint:");
+                        let mut fp = self.local_fingerprint.clone();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut fp)
+                                .interactive(false)
+                        );
+                        if ui.button("Copy Fingerprint").clicked() {
+                            ui.output_mut(|o| o.copied_text = self.local_fingerprint.clone());
                         }
                     });
 
@@ -261,5 +264,45 @@ impl eframe::App for FlowApp {
                 });
             });
         });
+
+        // Show TOFU fingerprint verification modal if any connection is pending trust approval
+        let pending_request = {
+            let trusts = self.engine.pending_trusts.lock().unwrap();
+            trusts.first().map(|req| (req.ip.clone(), req.fingerprint.clone()))
+        };
+
+        if let Some((ip, fingerprint)) = pending_request {
+            egui::Window::new("Security Alert - Untrusted Connection")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 215, 0), "⚠️ A new computer is requesting a connection.");
+                    ui.add_space(5.0);
+                    ui.label(format!("IP Address: {}", ip));
+                    ui.add_space(5.0);
+                    ui.label("SHA-256 Certificate Fingerprint:");
+                    ui.code(&fingerprint);
+                    ui.add_space(10.0);
+                    ui.label("Please compare this fingerprint with the code shown on the other computer's screen. If they match, it is safe to connect.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Trust and Connect").clicked() {
+                            let mut list = self.engine.pending_trusts.lock().unwrap();
+                            if !list.is_empty() {
+                                let req = list.remove(0);
+                                let _ = req.tx.send(true);
+                            }
+                        }
+                        if ui.button("Reject Connection").clicked() {
+                            let mut list = self.engine.pending_trusts.lock().unwrap();
+                            if !list.is_empty() {
+                                let req = list.remove(0);
+                                let _ = req.tx.send(false);
+                            }
+                        }
+                    });
+                });
+        }
     }
 }

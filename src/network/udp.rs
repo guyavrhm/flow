@@ -1,5 +1,3 @@
-use crate::config::SettingsData;
-use crate::crypto::CryptoKey;
 use crate::hardware::{KeyboardController, MouseController};
 use crate::network::protocol::InputEvent;
 use std::net::UdpSocket;
@@ -29,11 +27,10 @@ impl UdpServer {
     pub fn listen_handshake(
         &self,
         client_ip: &str,
-        settings: &SettingsData,
+        cryptor: &crate::crypto::UdpCryptor,
     ) -> std::io::Result<std::net::SocketAddr> {
         log::debug!("UDP Server: Listening for handshake from {}", client_ip);
         self.socket.set_read_timeout(Some(Duration::from_secs(3)))?;
-        let key = CryptoKey::new(&settings.password);
 
         let mut buf = [0u8; 1024];
         let start_time = std::time::Instant::now();
@@ -42,11 +39,18 @@ impl UdpServer {
             match self.socket.recv_from(&mut buf) {
                 Ok((len, addr)) => {
                     if addr.ip().to_string() == client_ip {
-                        let decrypted = key.decrypt(&buf[..len]);
-                        if decrypted == b"." {
-                            self.socket.set_read_timeout(None)?;
-                            log::info!("UDP Handshake: Succeeded for client endpoint: {}", addr);
-                            return Ok(addr);
+                        if len > 8 {
+                            let mut seq_bytes = [0u8; 8];
+                            seq_bytes.copy_from_slice(&buf[0..8]);
+                            let seq = u64::from_be_bytes(seq_bytes);
+
+                            if let Ok(decrypted) = cryptor.decrypt(seq, &buf[8..len]) {
+                                if decrypted == b"." {
+                                    self.socket.set_read_timeout(None)?;
+                                    log::info!("UDP Handshake: Succeeded for client endpoint: {}", addr);
+                                    return Ok(addr);
+                                }
+                            }
                         }
                     }
                 }
@@ -71,13 +75,19 @@ impl UdpServer {
         &self,
         event: &InputEvent,
         dest: std::net::SocketAddr,
-        settings: &SettingsData,
+        cryptor: &crate::crypto::UdpCryptor,
+        seq: u64,
     ) -> std::io::Result<()> {
         log::trace!("UDP Server: Sending event {:?} to {}", event, dest);
         let payload = format_event(event);
-        let key = CryptoKey::new(&settings.password);
-        let encrypted = key.encrypt(payload.as_bytes());
-        self.socket.send_to(&encrypted, dest)?;
+        let ciphertext = cryptor.encrypt(seq, payload.as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let mut packet = Vec::with_capacity(8 + ciphertext.len());
+        packet.extend_from_slice(&seq.to_be_bytes());
+        packet.extend_from_slice(&ciphertext);
+
+        self.socket.send_to(&packet, dest)?;
         Ok(())
     }
 }
@@ -85,6 +95,7 @@ impl UdpServer {
 pub struct UdpClient {
     running: Arc<Mutex<bool>>,
     socket: Arc<Mutex<Option<UdpSocket>>>,
+    cryptor: Arc<Mutex<Option<crate::crypto::UdpCryptor>>>,
 }
 
 impl UdpClient {
@@ -92,26 +103,38 @@ impl UdpClient {
         Self {
             running: Arc::new(Mutex::new(false)),
             socket: Arc::new(Mutex::new(None)),
+            cryptor: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn start(&self, server_ip: &str, settings: SettingsData) -> std::io::Result<()> {
+    pub fn start(&self, server_ip: &str, key: [u8; 32], salt: [u8; 4]) -> std::io::Result<()> {
         log::info!("UDP Client connecting to {}...", server_ip);
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
 
         let server_dest = format!("{}:8118", server_ip);
 
-        let key = CryptoKey::new(&settings.password);
-        let encrypted = key.encrypt(b".");
+        let cryptor = crate::crypto::UdpCryptor::new(&key, salt);
+
+        // Encrypt handshake packet with sequence 0
+        let ciphertext = cryptor.encrypt(0, b".")
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let mut packet = Vec::with_capacity(8 + ciphertext.len());
+        packet.extend_from_slice(&0u64.to_be_bytes());
+        packet.extend_from_slice(&ciphertext);
 
         // Send handshake packet
-        socket.send_to(&encrypted, &server_dest)?;
+        socket.send_to(&packet, &server_dest)?;
         log::info!("UDP Client sent handshake to {}", server_dest);
 
         {
             let mut s = self.socket.lock().unwrap();
             *s = Some(socket.try_clone().unwrap());
+        }
+        {
+            let mut c = self.cryptor.lock().unwrap();
+            *c = Some(cryptor);
         }
 
         let running = self.running.clone();
@@ -122,11 +145,12 @@ impl UdpClient {
 
         let socket_clone = socket.try_clone().unwrap();
         let running_clone = running.clone();
+        let cryptor_clone = self.cryptor.clone();
 
         thread::spawn(move || {
             let mouse = MouseController::new();
             let keyboard = KeyboardController::new();
-            let key = CryptoKey::new(&settings.password);
+            let mut replay_protector = crate::crypto::UdpReplayProtector::new();
             let mut buf = [0u8; 1024];
 
             loop {
@@ -139,37 +163,56 @@ impl UdpClient {
 
                 match socket_clone.recv_from(&mut buf) {
                     Ok((len, _)) => {
-                        let decrypted = key.decrypt(&buf[..len]);
-                        if let Ok(dec_str) = std::str::from_utf8(&decrypted) {
-                            if let Some(event) = parse_event(dec_str) {
-                                log::trace!("UDP Client: Received event {:?}", event);
-                                match event {
-                                    InputEvent::Move { x, y } => {
-                                        mouse.set_position((x, y));
-                                    }
-                                    InputEvent::MouseScroll { dx, dy } => {
-                                        mouse.scroll(dx, dy);
-                                    }
-                                    InputEvent::MouseClick { button, pressed } => {
-                                        if pressed {
-                                            mouse.press(&button);
-                                        } else {
-                                            mouse.release(&button);
+                        if len <= 8 {
+                            continue;
+                        }
+
+                        let mut seq_bytes = [0u8; 8];
+                        seq_bytes.copy_from_slice(&buf[0..8]);
+                        let seq = u64::from_be_bytes(seq_bytes);
+
+                        if !replay_protector.is_valid(seq) {
+                            log::warn!("UDP Client: Replay protector rejected sequence {}", seq);
+                            continue;
+                        }
+
+                        let crypt_opt = cryptor_clone.lock().unwrap();
+                        if let Some(ref c) = *crypt_opt {
+                            if let Ok(decrypted) = c.decrypt(seq, &buf[8..len]) {
+                                if let Ok(dec_str) = std::str::from_utf8(&decrypted) {
+                                    if let Some(event) = parse_event(dec_str) {
+                                        log::trace!("UDP Client: Received event {:?}", event);
+                                        match event {
+                                            InputEvent::Move { x, y } => {
+                                                mouse.set_position((x, y));
+                                            }
+                                            InputEvent::MouseScroll { dx, dy } => {
+                                                mouse.scroll(dx, dy);
+                                            }
+                                            InputEvent::MouseClick { button, pressed } => {
+                                                if pressed {
+                                                    mouse.press(&button);
+                                                } else {
+                                                    mouse.release(&button);
+                                                }
+                                            }
+                                            InputEvent::KeyPress { key: k, pressed } => {
+                                                if pressed {
+                                                    keyboard.press(&k);
+                                                } else {
+                                                    keyboard.release(&k);
+                                                }
+                                            }
+                                            InputEvent::Stop => {
+                                                log::info!("UDP Client: Received stop command from server");
+                                            }
                                         }
-                                    }
-                                    InputEvent::KeyPress { key: k, pressed } => {
-                                        if pressed {
-                                            keyboard.press(&k);
-                                        } else {
-                                            keyboard.release(&k);
-                                        }
-                                    }
-                                    InputEvent::Stop => {
-                                        log::info!("UDP Client: Received stop command from server");
+                                    } else {
+                                        log::warn!("UDP Client: Received unparseable payload: {}", dec_str);
                                     }
                                 }
                             } else {
-                                log::warn!("UDP Client: Received unparseable payload: {}", dec_str);
+                                log::warn!("UDP Client: Failed to decrypt UDP packet with sequence {}", seq);
                             }
                         }
                     }
@@ -195,6 +238,8 @@ impl UdpClient {
         *r = false;
         let mut s = self.socket.lock().unwrap();
         *s = None;
+        let mut c = self.cryptor.lock().unwrap();
+        *c = None;
     }
 }
 
