@@ -641,14 +641,7 @@ impl AppEngine {
                                 }
                             } else {
                                 // Clamp to previous monitor
-                                let prev_mon = all_monitors
-                                    .into_iter()
-                                    .filter(|m| m.host == curr)
-                                    .min_by_key(|m| {
-                                        let dx = (m.x - gx).max(0).max(gx - (m.x + m.width - 1));
-                                        let dy = (m.y - gy).max(0).max(gy - (m.y + m.height - 1));
-                                        dx * dx + dy * dy
-                                    });
+                                let prev_mon = find_closest_client_monitor(gx, gy, &curr, &all_monitors);
                                 if let Some(pm) = prev_mon {
                                     let clamped_x = gx.clamp(pm.x, pm.x + pm.width - 1);
                                     let clamped_y = gy.clamp(pm.y, pm.y + pm.height - 1);
@@ -1027,7 +1020,7 @@ impl AppEngine {
 
 
 
-fn find_client_monitor_containing(gx: i32, gy: i32) -> Option<crate::config::MonitorLayout> {
+pub fn find_client_monitor_containing(gx: i32, gy: i32) -> Option<crate::config::MonitorLayout> {
     if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
         for lay in layouts {
             if lay.host != "main" {
@@ -1039,6 +1032,23 @@ fn find_client_monitor_containing(gx: i32, gy: i32) -> Option<crate::config::Mon
         }
     }
     None
+}
+
+pub fn find_closest_client_monitor(
+    gx: i32,
+    gy: i32,
+    host: &str,
+    monitors: &[crate::config::MonitorLayout],
+) -> Option<crate::config::MonitorLayout> {
+    monitors
+        .iter()
+        .filter(|m| m.host == host)
+        .cloned()
+        .min_by_key(|m| {
+            let dx = (m.x - gx).max(0).max(gx - (m.x + m.width - 1));
+            let dy = (m.y - gy).max(0).max(gy - (m.y + m.height - 1));
+            dx * dx + dy * dy
+        })
 }
 
 fn send_warp_to_client(

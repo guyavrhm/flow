@@ -716,3 +716,128 @@ fn test_client_reconnection_flow() {
         let _ = fs::remove_file(&db_path);
     }
 }
+
+// ==========================================
+// 6. VIRTUAL COORDINATED DESKTOP SPACE TESTS
+// ==========================================
+
+#[test]
+fn test_virtual_coordinated_desktop_space() {
+    let _lock = get_db_lock().lock().unwrap_or_else(|e| e.into_inner());
+    use std::fs;
+    use flow::config::{initialize_db, MonitorLayout, save_monitor_layout};
+    use flow::engine::{find_client_monitor_containing, find_closest_client_monitor};
+    use flow::paths::get_db_path;
+
+    // Backup DB
+    let db_path = get_db_path();
+    let backup_path = db_path.with_extension("db.backup");
+    let has_backup = if db_path.exists() {
+        fs::copy(&db_path, &backup_path).is_ok()
+    } else {
+        false
+    };
+
+    // Ensure clean test DB
+    if db_path.exists() {
+        let _ = fs::remove_file(&db_path);
+    }
+    initialize_db().unwrap();
+
+    // Define two monitors for client host "192.168.1.50"
+    let mon_a = MonitorLayout {
+        monitor_id: "client_display_1".to_string(),
+        host: "192.168.1.50".to_string(),
+        monitor_name: "Display 1".to_string(),
+        x: 1000,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        scale_factor: 1.0,
+        local_x: 0,
+        local_y: 0,
+    };
+
+    let mon_b = MonitorLayout {
+        monitor_id: "client_display_2".to_string(),
+        host: "192.168.1.50".to_string(),
+        monitor_name: "Display 2".to_string(),
+        x: 2920,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        scale_factor: 1.0,
+        local_x: 1920,
+        local_y: 0,
+    };
+
+    save_monitor_layout(&mon_a).unwrap();
+    save_monitor_layout(&mon_b).unwrap();
+
+    // 1. Test find_client_monitor_containing
+    // Inside Monitor A
+    let found = find_client_monitor_containing(1500, 500);
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().monitor_id, "client_display_1");
+
+    // Inside Monitor B
+    let found = find_client_monitor_containing(3500, 500);
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().monitor_id, "client_display_2");
+
+    // Outside coordinates (dead space / host space)
+    let found = find_client_monitor_containing(500, 500);
+    assert!(found.is_none());
+
+    let found = find_client_monitor_containing(3000, 2000);
+    assert!(found.is_none());
+
+    // 2. Test find_closest_client_monitor clamping fallback
+    let monitors_list = vec![mon_a, mon_b];
+
+    // Case 1: Point to the left of Monitor A (gx = 900, gy = 500) -> Should pick Monitor A
+    let closest = find_closest_client_monitor(900, 500, "192.168.1.50", &monitors_list);
+    assert!(closest.is_some());
+    assert_eq!(closest.unwrap().monitor_id, "client_display_1");
+
+    // Case 2: Point to the right of Monitor B (gx = 4900, gy = 500) -> Should pick Monitor B
+    let closest = find_closest_client_monitor(4900, 500, "192.168.1.50", &monitors_list);
+    assert!(closest.is_some());
+    assert_eq!(closest.unwrap().monitor_id, "client_display_2");
+
+    // Case 3: Point in dead space between Monitor A and Monitor B (gx = 2500, gy = 500)
+    // Distance to Mon A right (x = 2919) is 419px.
+    // Distance to Mon B left (x = 2920) is 420px.
+    // -> Should pick Monitor A as it is slightly closer (419px vs 420px).
+    let closest = find_closest_client_monitor(2500, 500, "192.168.1.50", &monitors_list);
+    assert!(closest.is_some());
+    assert_eq!(closest.unwrap().monitor_id, "client_display_1");
+
+    // Case 4: Point closer to Monitor B (gx = 2900, gy = 500)
+    // Distance to Mon B left (2920) is 20px.
+    // Distance to Mon A right (2919) is 19px. Wait: 2900 is 19px left of 2919? No, 2900 is left of 2919, so it is inside Mon A!
+    // Let's pick gx = 2919: inside Mon A.
+    // Let's pick gx = 2920: inside Mon B.
+    // Let's pick gx = 2921: inside Mon B.
+    // Let's pick gx = 2920 - 1 = 2919: inside Mon A.
+    // Let's pick gx = 2919 + 0.5? No, integers.
+    // Let's pick gx = 2919 (inside Mon A).
+    // Let's test a point outside both, say gx = 2920 - 10 = 2910.
+    // Distance to Mon A (1000 to 2919): gx is 2910, which is inside Mon A!
+    // Oh, since Mon A ends at 2919, and Mon B starts at 2920, there is NO dead space between them horizontally!
+    // Let's test vertically: gy = -50 (above both).
+    // gx = 3500 (over Mon B), gy = -50.
+    // -> Should pick Monitor B (dy = 50, dx = 0).
+    let closest = find_closest_client_monitor(3500, -50, "192.168.1.50", &monitors_list);
+    assert!(closest.is_some());
+    assert_eq!(closest.unwrap().monitor_id, "client_display_2");
+
+    // Cleanup and Restore DB backup
+    if has_backup {
+        let _ = fs::copy(&backup_path, &db_path);
+        let _ = fs::remove_file(&backup_path);
+    } else if db_path.exists() {
+        let _ = fs::remove_file(&db_path);
+    }
+}
+
