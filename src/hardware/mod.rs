@@ -7,6 +7,32 @@ pub mod win;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+pub trait MouseSimulator: Send + Sync {
+    fn position(&self) -> (i32, i32);
+    fn set_position(&self, pos: (i32, i32));
+    fn press(&self, button: &str);
+    fn release(&self, button: &str);
+    fn scroll(&self, dx: i32, dy: i32);
+}
+
+pub trait KeyboardSimulator: Send + Sync {
+    fn press(&self, key: &str);
+    fn release(&self, key: &str);
+}
+
+pub trait InputHookListener: Send + Sync {
+    fn start(&self);
+    fn stop(&self);
+}
+
+pub trait ClipboardManager: Send + Sync {
+    fn data(&self) -> String;
+    fn set_text(&self, text: &str);
+    fn set_files(&self, files: Vec<String>);
+    fn set_promise(&self, id: &str, format: &str, size: usize);
+}
+
+
 use std::sync::atomic::AtomicU32;
 use once_cell::sync::Lazy;
 
@@ -95,19 +121,19 @@ impl PromisedClipboard {
 
 #[cfg(target_os = "macos")]
 pub use mac::{
-    Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
+    ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
     init_keyboard_layout, ClipboardListener, get_monitors,
 };
 
 #[cfg(target_os = "windows")]
 pub use win::{
-    Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
+    ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
     init_keyboard_layout, ClipboardListener, get_monitors,
 };
 
 #[cfg(target_os = "linux")]
 pub use linux::{
-    Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
+    ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
     init_keyboard_layout, ClipboardListener, get_monitors,
 };
 

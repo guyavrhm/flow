@@ -26,6 +26,8 @@ chacha20poly1305 = "0.10"
 rand = "0.8"
 rustls-pemfile = "2.1"
 rustc-hash = "2.0.0"
+tokio = { version = "1.38", features = ["full"] }
+tokio-rustls = "0.26"
 
 
 

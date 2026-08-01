@@ -1,6 +1,10 @@
 use rusqlite::{Connection, Result, params};
 use std::fs;
 use crate::paths::get_db_path;
+use once_cell::sync::Lazy;
+use std::sync::RwLock;
+
+static MONITOR_LAYOUT_CACHE: Lazy<RwLock<Option<Vec<MonitorLayout>>>> = Lazy::new(|| RwLock::new(None));
 
 pub const PC_SERVER: i32 = 1;
 pub const PC_CLIENT: i32 = 0;
@@ -281,10 +285,20 @@ pub fn save_monitor_layout(layout: &MonitorLayout) -> Result<()> {
             layout.local_y
         ],
     )?;
+    // Invalidate the cache
+    let mut cache = MONITOR_LAYOUT_CACHE.write().unwrap();
+    *cache = None;
     Ok(())
 }
 
 pub fn get_all_monitor_layouts() -> Result<Vec<MonitorLayout>> {
+    {
+        let cache = MONITOR_LAYOUT_CACHE.read().unwrap();
+        if let Some(ref layouts) = *cache {
+            return Ok(layouts.clone());
+        }
+    }
+
     let db_path = get_db_path();
     let conn = Connection::open(&db_path)?;
     let mut stmt = conn.prepare("SELECT monitor_id, host, monitor_name, x, y, width, height, scale_factor, local_x, local_y FROM monitors")?;
@@ -306,6 +320,10 @@ pub fn get_all_monitor_layouts() -> Result<Vec<MonitorLayout>> {
     for item in iter {
         list.push(item?);
     }
+
+    let mut cache = MONITOR_LAYOUT_CACHE.write().unwrap();
+    *cache = Some(list.clone());
+
     Ok(list)
 }
 
@@ -313,6 +331,9 @@ pub fn remove_monitor_layout(monitor_id: &str) -> Result<()> {
     let db_path = get_db_path();
     let conn = Connection::open(&db_path)?;
     conn.execute("DELETE FROM monitors WHERE monitor_id = ?", params![monitor_id])?;
+    // Invalidate the cache
+    let mut cache = MONITOR_LAYOUT_CACHE.write().unwrap();
+    *cache = None;
     Ok(())
 }
 
@@ -320,5 +341,8 @@ pub fn remove_monitor_layouts_by_host(host: &str) -> Result<()> {
     let db_path = get_db_path();
     let conn = Connection::open(&db_path)?;
     conn.execute("DELETE FROM monitors WHERE host = ?", params![host])?;
+    // Invalidate the cache
+    let mut cache = MONITOR_LAYOUT_CACHE.write().unwrap();
+    *cache = None;
     Ok(())
 }

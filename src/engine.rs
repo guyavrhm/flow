@@ -1,16 +1,18 @@
-use crate::config::{ScreenAttachments, SettingsData, get_attachments, get_settings};
+pub mod layout;
+pub mod tracker;
+pub mod clipboard;
+
+use crate::config::{SettingsData, get_settings};
 use crate::hardware::{
-    Clipboard, KeyboardListener, MouseController, MouseListener, get_screeninfo,
+    ClipboardController, KeyboardListener, MouseController, MouseListener,
 };
-use once_cell::sync::Lazy;
+use clipboard::{hash_clipboard_data, stream_offered_data, handle_incoming_clipboard_chunk};
 
 pub struct OfferedData {
     pub id: String,
     pub format: String,
     pub data: String,
 }
-
-pub static ACTIVE_OFFERED_DATA: Lazy<Mutex<Option<OfferedData>>> = Lazy::new(|| Mutex::new(None));
 
 pub struct ClipboardAccumulator {
     pub id: String,
@@ -63,6 +65,7 @@ pub struct AppEngine {
     // Status signals for UI
     pub is_connected: Arc<Mutex<bool>>,
     pub pending_trusts: Arc<Mutex<Vec<PendingTrustRequest>>>,
+    pub offered_data: Arc<Mutex<Option<OfferedData>>>,
 }
 
 impl AppEngine {
@@ -89,6 +92,7 @@ impl AppEngine {
             clipboard_accumulator: Arc::new(Mutex::new(None)),
             is_connected: Arc::new(Mutex::new(false)),
             pending_trusts: Arc::new(Mutex::new(Vec::new())),
+            offered_data: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -343,6 +347,7 @@ impl AppEngine {
 
         let tcp_server_clip = self.tcp_server.clone();
         let clipboard_accumulator_server = self.clipboard_accumulator.clone();
+        let offered_data_recv = self.offered_data.clone();
 
         let on_clipboard_recv = move |payload: ClipboardPayload, from_ip: String| {
             let data_repr = match &payload {
@@ -365,11 +370,11 @@ impl AppEngine {
 
             match &payload {
                 ClipboardPayload::Text { text } => {
-                    Clipboard::set_text(text);
+                    ClipboardController::set_text(text);
                 }
                 ClipboardPayload::Files { files } => {
                     let local_paths = crate::network::protocol::write_clipboard_files(files);
-                    Clipboard::set_files(local_paths);
+                    ClipboardController::set_files(local_paths);
                 }
                 ClipboardPayload::Offer { id, size, format } => {
                     crate::hardware::PromisedClipboard::set_promise(id, format, *size);
@@ -379,7 +384,7 @@ impl AppEngine {
                     tcp_server_clip.broadcast_clipboard(&payload, Some(&from_ip));
                     
                     // Check if Server owns it
-                    if let Some(active_offered) = ACTIVE_OFFERED_DATA.lock().unwrap().as_ref() {
+                    if let Some(active_offered) = offered_data_recv.lock().unwrap().as_ref() {
                         if &active_offered.id == id {
                             let offered_data = active_offered.data.clone();
                             let format = active_offered.format.clone();
@@ -403,7 +408,7 @@ impl AppEngine {
             }
 
             if is_set_payload {
-                let read_back = Clipboard::data();
+                let read_back = ClipboardController::data();
                 if !read_back.is_empty() && read_back != "unknown format" {
                     crate::hardware::push_ignore_hash(hash_clipboard_data(&read_back));
                 }
@@ -426,460 +431,28 @@ impl AppEngine {
     }
 
     fn spawn_server_edge_tracking(&self) {
-        let is_running = self.is_running.clone();
-        let active_clients = self.active_clients.clone();
-        let current_controlled = self.current_controlled.clone();
-        let mouse_listener = self.mouse_listener.clone();
-        let keyboard_listener = self.keyboard_listener.clone();
-        let udp_server = self.udp_server.clone();
-        let global_mouse_x = self.global_mouse_x.clone();
-        let global_mouse_y = self.global_mouse_y.clone();
-
-        thread::spawn(move || {
-            let mouse_ctrl = MouseController::new();
-
-            while *is_running.lock().unwrap() {
-                thread::sleep(Duration::from_millis(10));
-
-                let is_main = {
-                    let curr = current_controlled.lock().unwrap();
-                    *curr == "main"
-                };
-
-                if is_main {
-                    // Track local mouse coordinates
-                    let pos = mouse_ctrl.position(); // local coordinates (lx, ly)
-                    
-                    // Retrieve local monitors (server monitors)
-                    let local_mons = crate::hardware::get_monitors();
-                    // Let's find which monitor containing the mouse
-                    let mut found_mon = None;
-                    for m in &local_mons {
-                        if pos.0 >= m.local_x && pos.0 < m.local_x + m.width
-                            && pos.1 >= m.local_y && pos.1 < m.local_y + m.height {
-                            found_mon = Some(m.clone());
-                            break;
-                        }
-                    }
-                    // Fallback to first if none contains the coordinate
-                    let active_mon = found_mon.unwrap_or_else(|| {
-                        local_mons.first().cloned().unwrap_or(crate::network::protocol::MonitorInfo {
-                            name: "Main Display".to_string(),
-                            local_x: 0,
-                            local_y: 0,
-                            width: 1920,
-                            height: 1080,
-                            scale_factor: 1.0,
-                        })
-                    });
-
-                    // Query the DB coordinate layout for this server monitor
-                    let db_mon = crate::config::get_all_monitor_layouts().ok().and_then(|lays| {
-                        lays.into_iter().find(|l| l.host == "main" && l.monitor_name == active_mon.name)
-                    }).unwrap_or_else(|| crate::config::MonitorLayout {
-                        monitor_id: format!("main_{}", active_mon.name),
-                        host: "main".to_string(),
-                        monitor_name: active_mon.name.clone(),
-                        x: active_mon.local_x,
-                        y: active_mon.local_y,
-                        width: active_mon.width,
-                        height: active_mon.height,
-                        scale_factor: active_mon.scale_factor,
-                        local_x: active_mon.local_x,
-                        local_y: active_mon.local_y,
-                    });
-
-                    // Compute global coordinate (gx, gy)
-                    let gx = db_mon.x + (pos.0 - active_mon.local_x);
-                    let gy = db_mon.y + (pos.1 - active_mon.local_y);
-                    
-                    {
-                        *global_mouse_x.lock().unwrap() = gx;
-                        *global_mouse_y.lock().unwrap() = gy;
-                    }
-
-                    // Check if mouse is near any edge of active_mon to transition
-                    let mut target_screen: Option<String> = None;
-                    let mut enter_pos = (0, 0); // global position
-
-                    // Checks: Left edge
-                    if pos.0 < active_mon.local_x + 5 {
-                        let gx_proj = db_mon.x - 8;
-                        let gy_proj = gy;
-                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
-                            target_screen = Some(target.host.clone());
-                            enter_pos = (gx_proj, gy_proj);
-                        }
-                    }
-                    // Right edge
-                    else if pos.0 > active_mon.local_x + active_mon.width - 5 {
-                        let gx_proj = db_mon.x + db_mon.width + 8;
-                        let gy_proj = gy;
-                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
-                            target_screen = Some(target.host.clone());
-                            enter_pos = (gx_proj, gy_proj);
-                        }
-                    }
-                    // Top edge
-                    else if pos.1 < active_mon.local_y + 5 {
-                        let gx_proj = gx;
-                        let gy_proj = db_mon.y - 8;
-                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
-                            target_screen = Some(target.host.clone());
-                            enter_pos = (gx_proj, gy_proj);
-                        }
-                    }
-                    // Bottom edge
-                    else if pos.1 > active_mon.local_y + active_mon.height - 5 {
-                        let gx_proj = gx;
-                        let gy_proj = db_mon.y + db_mon.height + 8;
-                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
-                            target_screen = Some(target.host.clone());
-                            enter_pos = (gx_proj, gy_proj);
-                        }
-                    }
-
-                    if let Some(target_ip) = target_screen {
-                        log::info!("Transitioning control to client: {}", target_ip);
-                        {
-                            let mut curr = current_controlled.lock().unwrap();
-                            *curr = target_ip.clone();
-                        }
-                        {
-                            *global_mouse_x.lock().unwrap() = enter_pos.0;
-                            *global_mouse_y.lock().unwrap() = enter_pos.1;
-                        }
-
-                        // Send warp to client
-                        send_warp_to_client(&target_ip, enter_pos.0, enter_pos.1, &active_clients, &udp_server);
-
-                        // Start input listeners on server
-                        let active_clients_cb = active_clients.clone();
-                        let current_controlled_cb = current_controlled.clone();
-                        let udp_server_cb = udp_server.clone();
-                        let global_mouse_x_cb = global_mouse_x.clone();
-                        let global_mouse_y_cb = global_mouse_y.clone();
-
-                        let on_move = move |dx: i32, dy: i32| {
-                            let curr = current_controlled_cb.lock().unwrap().clone();
-                            if curr == "main" {
-                                return;
-                            }
-
-                            // Load active monitors (server + active clients)
-                            let mut all_monitors = Vec::new();
-                            if let Ok(db_mons) = crate::config::get_all_monitor_layouts() {
-                                let clients = active_clients_cb.lock().unwrap();
-                                for m in db_mons {
-                                    if m.host == "main" || clients.contains_key(&m.host) {
-                                        all_monitors.push(m);
-                                    }
-                                }
-                            }
-
-                            let (gx, gy) = {
-                                let mut gmx = global_mouse_x_cb.lock().unwrap();
-                                let mut gmy = global_mouse_y_cb.lock().unwrap();
-                                *gmx += dx;
-                                *gmy += dy;
-                                (*gmx, *gmy)
-                            };
-
-                            // Find which monitor containing the new coordinates
-                            let mut current_mon = None;
-                            for m in &all_monitors {
-                                if gx >= m.x && gx < m.x + m.width
-                                    && gy >= m.y && gy < m.y + m.height {
-                                    current_mon = Some(m.clone());
-                                    break;
-                                }
-                            }
-
-                            if let Some(mon) = current_mon {
-                                if mon.host == "main" {
-                                    // Transition back to server
-                                    log::info!("Transitioning control back to server");
-                                    {
-                                        let mut clients = active_clients_cb.lock().unwrap();
-                                        if let Some(c) = clients.get_mut(&curr) {
-                                            if let Some(udp) = udp_server_cb.lock().unwrap().as_ref() {
-                                                if let Some(addr) = c.udp_addr {
-                                                    c.udp_seq += 1;
-                                                    let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, c.udp_seq);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    {
-                                        *current_controlled_cb.lock().unwrap() = "main".to_string();
-                                    }
-                                    // Warp server mouse to mon.local_x + offset
-                                    let lx = mon.local_x + (gx - mon.x);
-                                    let ly = mon.local_y + (gy - mon.y);
-                                    MouseController::new().set_position((lx, ly));
-                                } else if mon.host != curr {
-                                    // Transition between different clients
-                                    log::info!("Transitioning directly between clients: {} -> {}", curr, mon.host);
-                                    {
-                                        let mut clients = active_clients_cb.lock().unwrap();
-                                        if let Some(c) = clients.get_mut(&curr) {
-                                            if let Some(udp) = udp_server_cb.lock().unwrap().as_ref() {
-                                                if let Some(addr) = c.udp_addr {
-                                                    c.udp_seq += 1;
-                                                    let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, c.udp_seq);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    {
-                                        *current_controlled_cb.lock().unwrap() = mon.host.clone();
-                                    }
-                                    send_warp_to_client(&mon.host, gx, gy, &active_clients_cb, &udp_server_cb);
-                                } else {
-                                    // Move within the same client
-                                    send_warp_to_client(&curr, gx, gy, &active_clients_cb, &udp_server_cb);
-                                }
-                            } else {
-                                // Clamp to previous monitor
-                                let prev_mon = find_closest_client_monitor(gx, gy, &curr, &all_monitors);
-                                if let Some(pm) = prev_mon {
-                                    let clamped_x = gx.clamp(pm.x, pm.x + pm.width - 1);
-                                    let clamped_y = gy.clamp(pm.y, pm.y + pm.height - 1);
-                                    {
-                                        *global_mouse_x_cb.lock().unwrap() = clamped_x;
-                                        *global_mouse_y_cb.lock().unwrap() = clamped_y;
-                                    }
-                                    send_warp_to_client(&curr, clamped_x, clamped_y, &active_clients_cb, &udp_server_cb);
-                                }
-                            }
-                        };
-
-                        let udp_server_click = udp_server.clone();
-                        let active_clients_click = active_clients.clone();
-                        let current_controlled_click = current_controlled.clone();
-
-                        let on_click = move |_x: i32, _y: i32, btn: String, pressed: bool| {
-                            let curr = current_controlled_click.lock().unwrap().clone();
-                            if curr == "main" {
-                                return;
-                            }
-                            let mut clients = active_clients_click.lock().unwrap();
-                            if let Some(c) = clients.get_mut(&curr) {
-                                if let Some(udp) = udp_server_click.lock().unwrap().as_ref() {
-                                    if let Some(addr) = c.udp_addr {
-                                        c.udp_seq += 1;
-                                        let seq = c.udp_seq;
-                                        let _ = udp.send_event(
-                                            &InputEvent::MouseClick {
-                                                button: btn,
-                                                pressed,
-                                            },
-                                            addr,
-                                            &c.cryptor,
-                                            seq,
-                                        );
-                                    }
-                                }
-                            }
-                        };
-
-                        let udp_server_scroll = udp_server.clone();
-                        let active_clients_scroll = active_clients.clone();
-                        let current_controlled_scroll = current_controlled.clone();
-
-                        let on_scroll = move |_x: i32, _y: i32, dx: i32, dy: i32| {
-                            let curr = current_controlled_scroll.lock().unwrap().clone();
-                            if curr == "main" {
-                                return;
-                            }
-                            let mut clients = active_clients_scroll.lock().unwrap();
-                            if let Some(c) = clients.get_mut(&curr) {
-                                if let Some(udp) = udp_server_scroll.lock().unwrap().as_ref() {
-                                    if let Some(addr) = c.udp_addr {
-                                        c.udp_seq += 1;
-                                        let seq = c.udp_seq;
-                                        let _ = udp.send_event(
-                                            &InputEvent::MouseScroll { dx, dy },
-                                            addr,
-                                            &c.cryptor,
-                                            seq,
-                                        );
-                                    }
-                                }
-                            }
-                        };
-
-                        let ml = MouseListener::new(on_move, on_click, on_scroll, true);
-                        ml.start();
-                        {
-                            let mut ml_lock = mouse_listener.lock().unwrap();
-                            *ml_lock = Some(ml);
-                        }
-
-                        let udp_server_press = udp_server.clone();
-                        let active_clients_press = active_clients.clone();
-                        let current_controlled_press = current_controlled.clone();
-
-                        let on_press = move |key: String| {
-                            let curr = current_controlled_press.lock().unwrap().clone();
-                            if curr == "main" {
-                                return;
-                            }
-                            let mut clients = active_clients_press.lock().unwrap();
-                            if let Some(c) = clients.get_mut(&curr) {
-                                if let Some(udp) = udp_server_press.lock().unwrap().as_ref() {
-                                    if let Some(addr) = c.udp_addr {
-                                        c.udp_seq += 1;
-                                        let seq = c.udp_seq;
-                                        let _ = udp.send_event(
-                                            &InputEvent::KeyPress { key, pressed: true },
-                                            addr,
-                                            &c.cryptor,
-                                            seq,
-                                        );
-                                    }
-                                }
-                            }
-                        };
-
-                        let udp_server_release = udp_server.clone();
-                        let active_clients_release = active_clients.clone();
-                        let current_controlled_release = current_controlled.clone();
-
-                        let on_release = move |key: String| {
-                            let curr = current_controlled_release.lock().unwrap().clone();
-                            if curr == "main" {
-                                return;
-                            }
-                            let mut clients = active_clients_release.lock().unwrap();
-                            if let Some(c) = clients.get_mut(&curr) {
-                                if let Some(udp) = udp_server_release.lock().unwrap().as_ref() {
-                                    if let Some(addr) = c.udp_addr {
-                                        c.udp_seq += 1;
-                                        let seq = c.udp_seq;
-                                        let _ = udp.send_event(
-                                            &InputEvent::KeyPress {
-                                                key,
-                                                pressed: false,
-                                            },
-                                            addr,
-                                            &c.cryptor,
-                                            seq,
-                                        );
-                                    }
-                                }
-                            }
-                        };
-
-                        let kl = KeyboardListener::new(on_press, on_release, true);
-                        kl.start();
-                        {
-                            let mut kl_lock = keyboard_listener.lock().unwrap();
-                            *kl_lock = Some(kl);
-                        }
-                    }
-                }
-            }
-        });
+        let tracker = tracker::ServerEdgeTracker::new(
+            self.is_running.clone(),
+            self.active_clients.clone(),
+            self.current_controlled.clone(),
+            self.mouse_listener.clone(),
+            self.keyboard_listener.clone(),
+            self.udp_server.clone(),
+            self.global_mouse_x.clone(),
+            self.global_mouse_y.clone(),
+        );
+        tracker.spawn();
     }
 
     fn start_clipboard_monitoring(&self) {
-        let settings = {
-            let s = self.settings.lock().unwrap();
-            s.clone()
-        };
-        let tcp_server = self.tcp_server.clone();
-        let tcp_client = self.tcp_client.clone();
-
-        let on_change = move || {
-            let data = Clipboard::data();
-            if data.is_empty() || data == "unknown format" {
-                return;
-            }
-
-            let mut is_files = false;
-            let mut total_size = 0;
-            if data.starts_with("file://") || data.starts_with('/') {
-                is_files = true;
-                for path_str in data.lines() {
-                    let path_str = path_str.trim_start_matches("file://");
-                    let path = std::path::Path::new(path_str);
-                    if path.exists() {
-                        if path.is_file() {
-                            if let Ok(metadata) = std::fs::metadata(path) {
-                                total_size += metadata.len() as usize;
-                            }
-                        } else if path.is_dir() {
-                            for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-                                if entry.path().is_file() {
-                                    if let Ok(metadata) = std::fs::metadata(entry.path()) {
-                                        total_size += metadata.len() as usize;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                total_size = data.len();
-            }
-
-            let data_hash = hash_clipboard_data(&data);
-            let is_from_network = crate::hardware::check_and_consume_ignore_hash(data_hash);
-
-            if !is_from_network {
-                if total_size > 5 * 1024 * 1024 {
-                    let id = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                        .to_string();
-                    let format = if is_files { "files".to_string() } else { "text".to_string() };
-                    log::info!("Clipboard: Local content is large ({} bytes). Registering promise id: {}", total_size, id);
-
-                    {
-                        let mut offered = ACTIVE_OFFERED_DATA.lock().unwrap();
-                        *offered = Some(OfferedData {
-                            id: id.clone(),
-                            format: format.clone(),
-                            data: data.clone(),
-                        });
-                    }
-
-                    let payload = ClipboardPayload::Offer {
-                        id,
-                        size: total_size,
-                        format,
-                    };
-                    if settings.pc == 1 {
-                        tcp_server.broadcast_clipboard(&payload, None);
-                    } else {
-                        let _ = tcp_client.send_clipboard(&payload);
-                    }
-                } else {
-                    log::info!("Clipboard: Local content updated, syncing...");
-                    let payload = if is_files {
-                        format_clipboard_data(&data)
-                    } else {
-                        Some(ClipboardPayload::Text { text: data })
-                    };
-
-                    if let Some(p) = payload {
-                        if settings.pc == 1 {
-                            tcp_server.broadcast_clipboard(&p, None);
-                        } else {
-                            let _ = tcp_client.send_clipboard(&p);
-                        }
-                    }
-                }
-            }
-        };
-
-        let listener = crate::hardware::ClipboardListener::new(on_change);
-        listener.start();
-
-        let mut lock = self.clipboard_listener.lock().unwrap();
-        *lock = Some(listener);
+        let manager = clipboard::ClipboardSyncManager::new(
+            self.settings.clone(),
+            self.tcp_server.clone(),
+            self.tcp_client.clone(),
+            self.offered_data.clone(),
+            self.clipboard_listener.clone(),
+        );
+        manager.start();
     }
 
     fn start_client(&self, settings: SettingsData) {
@@ -893,6 +466,7 @@ impl AppEngine {
         let pending_trusts = self.pending_trusts.clone();
         let is_running_loop = self.is_running.clone();
         let clipboard_accumulator_client = self.clipboard_accumulator.clone();
+        let offered_data_client = self.offered_data.clone();
 
         thread::spawn(move || {
             while *is_running_loop.lock().unwrap() {
@@ -933,6 +507,7 @@ impl AppEngine {
 
                     let tcp_client_stream = tcp_client.clone();
                     let clipboard_accumulator_conn = clipboard_accumulator_client.clone();
+                    let offered_data_loop = offered_data_client.clone();
                     let on_clipboard_recv = move |payload: ClipboardPayload| {
                         let data_repr = match &payload {
                             ClipboardPayload::Text { text } => text.clone(),
@@ -954,17 +529,17 @@ impl AppEngine {
 
                         match &payload {
                             ClipboardPayload::Text { text } => {
-                                Clipboard::set_text(text);
+                                ClipboardController::set_text(text);
                             }
                             ClipboardPayload::Files { files } => {
                                 let local_paths = crate::network::protocol::write_clipboard_files(files);
-                                Clipboard::set_files(local_paths);
+                                ClipboardController::set_files(local_paths);
                             }
                             ClipboardPayload::Offer { id, size, format } => {
                                 crate::hardware::PromisedClipboard::set_promise(id, format, *size);
                             }
                             ClipboardPayload::Request { id } => {
-                                if let Some(active_offered) = ACTIVE_OFFERED_DATA.lock().unwrap().as_ref() {
+                                if let Some(active_offered) = offered_data_loop.lock().unwrap().as_ref() {
                                     if &active_offered.id == id {
                                         let offered_data = active_offered.data.clone();
                                         let format = active_offered.format.clone();
@@ -984,7 +559,7 @@ impl AppEngine {
                         }
 
                         if is_set_payload {
-                            let read_back = Clipboard::data();
+                            let read_back = ClipboardController::data();
                             if !read_back.is_empty() && read_back != "unknown format" {
                                 crate::hardware::push_ignore_hash(hash_clipboard_data(&read_back));
                             }
@@ -1020,335 +595,13 @@ impl AppEngine {
 
 
 
-pub fn find_client_monitor_containing(gx: i32, gy: i32) -> Option<crate::config::MonitorLayout> {
-    if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
-        for lay in layouts {
-            if lay.host != "main" {
-                if gx >= lay.x && gx < lay.x + lay.width
-                    && gy >= lay.y && gy < lay.y + lay.height {
-                    return Some(lay);
-                }
-            }
-        }
-    }
-    None
-}
-
-pub fn find_closest_client_monitor(
-    gx: i32,
-    gy: i32,
-    host: &str,
-    monitors: &[crate::config::MonitorLayout],
-) -> Option<crate::config::MonitorLayout> {
-    monitors
-        .iter()
-        .filter(|m| m.host == host)
-        .cloned()
-        .min_by_key(|m| {
-            let dx = (m.x - gx).max(0).max(gx - (m.x + m.width - 1));
-            let dy = (m.y - gy).max(0).max(gy - (m.y + m.height - 1));
-            dx * dx + dy * dy
-        })
-}
-
-fn send_warp_to_client(
-    client_ip: &str,
-    gx: i32,
-    gy: i32,
-    active_clients: &Arc<Mutex<HashMap<String, ClientInfo>>>,
-    udp_server: &Arc<Mutex<Option<UdpServer>>>,
-) {
-    let mut clients = active_clients.lock().unwrap();
-    if let Some(c) = clients.get_mut(client_ip) {
-        let mut target_mon = None;
-        if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
-            for m in layouts {
-                if m.host == client_ip {
-                    if gx >= m.x && gx < m.x + m.width
-                        && gy >= m.y && gy < m.y + m.height {
-                        target_mon = Some(m);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let mon = target_mon.or_else(|| {
-            if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
-                layouts.into_iter().find(|m| m.host == client_ip)
-            } else {
-                None
-            }
-        });
-
-        if let Some(m) = mon {
-            let scale = if c.uses_physical_pixels { m.scale_factor } else { 1.0 };
-            let cx = m.local_x + ((gx - m.x) as f64 * scale) as i32;
-            let cy = m.local_y + ((gy - m.y) as f64 * scale) as i32;
-
-            if let Some(udp) = udp_server.lock().unwrap().as_ref() {
-                if let Some(addr) = c.udp_addr {
-                    c.udp_seq += 1;
-                    let seq = c.udp_seq;
-                    let _ = udp.send_event(
-                        &InputEvent::Move { x: cx, y: cy },
-                        addr,
-                        &c.cryptor,
-                        seq,
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn format_clipboard_data(paths_str: &str) -> Option<ClipboardPayload> {
-    let paths: Vec<&str> = paths_str.lines().filter(|line| !line.is_empty()).collect();
-    if paths.is_empty() {
-        return None;
-    }
-
-    let mut files = Vec::new();
-    let max_file_size = 50 * 1024 * 1024; // 50 MB
-
-    let first_path = std::path::Path::new(paths[0]);
-    let root_dir = match first_path.parent() {
-        Some(p) => p,
-        None => return None,
-    };
-
-    for path_str in paths {
-        let path = std::path::Path::new(path_str);
-        if !path.exists() {
-            log::warn!("Clipboard: Path does not exist: {:?}", path);
-            continue;
-        }
-
-        if path.is_file() {
-            if let Ok(metadata) = std::fs::metadata(path) {
-                if metadata.len() > max_file_size {
-                    log::warn!("Clipboard: Skipping {:?} (size {} bytes exceeds max limit of 50 MB)", path, metadata.len());
-                    continue;
-                }
-            }
-            match std::fs::read(path) {
-                Ok(data) => {
-                    if let Ok(rel) = path.strip_prefix(root_dir) {
-                        files.push(crate::network::protocol::ClipboardFile {
-                            is_dir: false,
-                            name: rel.to_string_lossy().to_string().replace('\\', "/"),
-                            data: Some(data),
-                        });
-                    }
-                }
-                Err(e) => {
-                    log::error!("Clipboard: Failed to read file {:?}: {:?}", path, e);
-                }
-            }
-        } else if path.is_dir() {
-            if let Ok(rel) = path.strip_prefix(root_dir) {
-                files.push(crate::network::protocol::ClipboardFile {
-                    is_dir: true,
-                    name: rel.to_string_lossy().to_string().replace('\\', "/"),
-                    data: None,
-                });
-            }
-
-            for entry in walkdir::WalkDir::new(path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let entry_path = entry.path();
-                if entry_path == path {
-                    continue;
-                }
-                if let Ok(rel) = entry_path.strip_prefix(root_dir) {
-                    let rel_name = rel.to_string_lossy().to_string().replace('\\', "/");
-                    if entry_path.is_file() {
-                        if let Ok(metadata) = std::fs::metadata(entry_path) {
-                            if metadata.len() > max_file_size {
-                                log::warn!("Clipboard: Skipping nested file {:?} (size {} bytes exceeds max limit of 50 MB)", entry_path, metadata.len());
-                                continue;
-                            }
-                        }
-                        match std::fs::read(entry_path) {
-                            Ok(data) => {
-                                files.push(crate::network::protocol::ClipboardFile {
-                                    is_dir: false,
-                                    name: rel_name,
-                                    data: Some(data),
-                                });
-                            }
-                            Err(e) => {
-                                log::error!("Clipboard: Failed to read nested file {:?}: {:?}", entry_path, e);
-                            }
-                        }
-                    } else if entry_path.is_dir() {
-                        files.push(crate::network::protocol::ClipboardFile {
-                            is_dir: true,
-                            name: rel_name,
-                            data: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    if files.is_empty() {
-        None
-    } else {
-        log::debug!("Clipboard: Formatted {} clipboard files to payload", files.len());
-        Some(ClipboardPayload::Files { files })
-    }
-}
-
-
-
-fn hash_clipboard_data(data: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = rustc_hash::FxHasher::default();
-    data.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn stream_offered_data<F>(id: &str, format: &str, data: &str, mut send_chunk: F)
-where
-    F: FnMut(ClipboardPayload),
-{
-    log::info!("Streaming clipboard data for promise id: {}, format: {}", id, format);
-    let bytes = if format == "text" {
-        data.as_bytes().to_vec()
-    } else {
-        if let Some(ClipboardPayload::Files { files }) = format_clipboard_data(data) {
-            match serde_json::to_vec(&files) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::error!("Failed to serialize files payload for promise streaming: {:?}", e);
-                    return;
-                }
-            }
-        } else {
-            log::warn!("No files to stream for format files, data: {}", data);
-            return;
-        }
-    };
-
-    let total_len = bytes.len();
-    let chunk_size = 64 * 1024; // 64 KB
-    let mut chunk_index = 0;
-    let mut offset = 0;
-
-    while offset < total_len {
-        let end = std::cmp::min(offset + chunk_size, total_len);
-        let chunk_data = bytes[offset..end].to_vec();
-        offset = end;
-        let is_last = offset >= total_len;
-
-        let payload = ClipboardPayload::Chunk {
-            id: id.to_string(),
-            chunk_index,
-            is_last,
-            data: chunk_data,
-        };
-
-        send_chunk(payload);
-        chunk_index += 1;
-
-        thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn handle_incoming_clipboard_chunk(
-    id: &str,
-    is_last: bool,
-    data: &[u8],
-    accumulator: &Arc<Mutex<Option<ClipboardAccumulator>>>,
-) {
-    let has_tx = {
-        let active_lock = crate::hardware::ACTIVE_PROMISE.lock().unwrap();
-        active_lock.as_ref()
-            .filter(|p| p.uuid == id)
-            .map(|p| p.tx.is_some())
-            .unwrap_or(false)
-    };
-
-    if !has_tx {
-        return;
-    }
-
-    let mut accum_lock = accumulator.lock().unwrap();
-
-    if accum_lock.is_none() || accum_lock.as_ref().map(|a| &a.id) != Some(&id.to_string()) {
-        let format = crate::hardware::get_active_promise_format(id).unwrap_or_else(|| "text".to_string());
-        let size = crate::hardware::ACTIVE_PROMISE.lock().unwrap().as_ref()
-            .filter(|p| p.uuid == id)
-            .map(|p| p.size)
-            .unwrap_or(0);
-
-        *accum_lock = Some(ClipboardAccumulator {
-            id: id.to_string(),
-            format,
-            size,
-            buffer: Vec::new(),
-        });
-
-        crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    let mut is_done = false;
-    let mut format = String::new();
-    let mut buffer = Vec::new();
-
-    if let Some(ref mut accum) = *accum_lock {
-        accum.buffer.extend_from_slice(data);
-        if accum.size > 0 {
-            let percent = (accum.buffer.len() * 100) / accum.size;
-            let percent = std::cmp::min(100, percent as u32);
-            crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(percent, std::sync::atomic::Ordering::Relaxed);
-        }
-        if is_last {
-            is_done = true;
-            format = accum.format.clone();
-            buffer = std::mem::take(&mut accum.buffer);
-        }
-    }
-
-    if is_done {
-        *accum_lock = None;
-        crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
-
-        let payload = match format.as_str() {
-            "text" => {
-                if let Ok(text) = String::from_utf8(buffer) {
-                    Some(crate::hardware::FulfillmentPayload::Text(text))
-                } else {
-                    log::error!("Clipboard: Failed to decode text payload UTF-8 string");
-                    None
-                }
-            }
-            "files" => {
-                if let Ok(files) = serde_json::from_slice::<Vec<crate::network::protocol::ClipboardFile>>(&buffer) {
-                    let local_paths = crate::network::protocol::write_clipboard_files(&files);
-                    Some(crate::hardware::FulfillmentPayload::Files(local_paths))
-                } else {
-                    log::error!("Clipboard: Failed to deserialize files payload from JSON");
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        if let Some(p) = payload {
-            crate::hardware::PromisedClipboard::fulfill_promise(id, p);
-        }
-    }
-}
+// Extracted to tracker and clipboard submodules
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::clipboard::hash_clipboard_data;
 
     #[test]
     fn test_hash_clipboard_data_determinism() {

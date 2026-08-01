@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MonitorInfo {
@@ -89,6 +90,31 @@ pub fn true_recv<R: Read>(stream: &mut R) -> std::io::Result<Vec<u8>> {
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let data = recv_exactly(stream, len)?;
+    Ok(data)
+}
+
+pub async fn recv_exactly_async<R: tokio::io::AsyncRead + Unpin>(stream: &mut R, n: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; n];
+    stream.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+pub async fn true_send_async<W: tokio::io::AsyncWrite + Unpin>(stream: &mut W, payload: &[u8]) -> std::io::Result<()> {
+    let len_str = format!("{:010}", payload.len());
+    stream.write_all(len_str.as_bytes()).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+pub async fn true_recv_async<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<Vec<u8>> {
+    let len_bytes = recv_exactly_async(stream, 10).await?;
+    let len_str = std::str::from_utf8(&len_bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let len: usize = len_str
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let data = recv_exactly_async(stream, len).await?;
     Ok(data)
 }
 

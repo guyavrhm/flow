@@ -53,8 +53,8 @@ impl KeyboardListener {
     pub fn join(&self) {}
 }
 
-pub struct Clipboard;
-impl Clipboard {
+pub struct ClipboardController;
+impl ClipboardController {
     pub fn data() -> String {
         String::new()
     }

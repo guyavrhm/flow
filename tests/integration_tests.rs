@@ -1,5 +1,5 @@
 use flow::config::SettingsData;
-use flow::hardware::{Clipboard, MouseController};
+use flow::hardware::{ClipboardController, MouseController};
 use flow::network::protocol::InputEvent;
 use flow::network::udp::{format_event, parse_event};
 
@@ -96,7 +96,7 @@ fn test_udp_malformed_event_parsing() {
 
 #[test]
 fn test_sqlite_settings_persistence() {
-    let _lock = get_db_lock().lock().unwrap();
+    let _lock = get_db_lock().lock().unwrap_or_else(|e| e.into_inner());
     use std::fs;
     use flow::config::{
         initialize_db, get_settings, save_settings, PC_CLIENT, ENCRYPTION_ON,
@@ -258,12 +258,12 @@ mod macos_tests {
     #[test]
     fn test_mac_clipboard_combined() {
         let _lock = get_clipboard_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let original_clipboard = Clipboard::data();
+        let original_clipboard = ClipboardController::data();
 
         let test_str = "flow-system-test-unique-string-123456";
-        Clipboard::set_text(test_str);
+        ClipboardController::set_text(test_str);
         thread::sleep(Duration::from_millis(100));
-        let read_back = Clipboard::data();
+        let read_back = ClipboardController::data();
         assert_eq!(read_back, test_str);
 
         let temp_dir = std::env::temp_dir();
@@ -278,10 +278,10 @@ mod macos_tests {
             file2_path.to_string_lossy().to_string(),
         ];
 
-        Clipboard::set_files(file_paths.clone());
+        ClipboardController::set_files(file_paths.clone());
         thread::sleep(Duration::from_millis(200));
 
-        let clipboard_data = Clipboard::data();
+        let clipboard_data = ClipboardController::data();
         let paths_returned: Vec<&str> = clipboard_data.lines().collect();
 
         let contains_file1 = paths_returned.contains(&file1_path.to_str().unwrap());
@@ -289,7 +289,7 @@ mod macos_tests {
 
         let _ = std::fs::remove_file(file1_path);
         let _ = std::fs::remove_file(file2_path);
-        Clipboard::set_text(&original_clipboard);
+        ClipboardController::set_text(&original_clipboard);
 
         assert!(contains_file1, "Clipboard did not contain file 1");
         assert!(contains_file2, "Clipboard did not contain file 2");
@@ -301,7 +301,7 @@ mod macos_tests {
         use std::sync::mpsc::channel;
         use flow::hardware::PromisedClipboard;
         
-        let original_clipboard = Clipboard::data();
+        let original_clipboard = ClipboardController::data();
         
         // 1. Initialize promise request receiver via callback
         let (req_tx, req_rx) = channel();
@@ -326,7 +326,7 @@ mod macos_tests {
         });
         
         // 4. Request the clipboard data. This blocks and triggers the promise resolution!
-        let read_back = Clipboard::data();
+        let read_back = ClipboardController::data();
         
         // Wait for helper thread to finish
         response_thread.join().unwrap();
@@ -337,7 +337,7 @@ mod macos_tests {
 
 
         // Restore original clipboard
-        Clipboard::set_text(&original_clipboard);
+        ClipboardController::set_text(&original_clipboard);
         
         // Clear promise callback to leave a clean state
         PromisedClipboard::on_request(|_| {});
@@ -511,12 +511,12 @@ mod linux_tests {
     #[test]
     fn test_linux_clipboard_combined() {
         let _lock = get_clipboard_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let original_clipboard = Clipboard::data();
+        let original_clipboard = ClipboardController::data();
 
         let test_str = "flow-system-test-unique-string-123456";
-        Clipboard::set_text(test_str);
+        ClipboardController::set_text(test_str);
         thread::sleep(Duration::from_millis(150));
-        let read_back = Clipboard::data();
+        let read_back = ClipboardController::data();
         if read_back != test_str {
             println!("Warning: Clipboard read back mismatch. Expected '{}', got '{}'. This is common in headless/CI environments.", test_str, read_back);
         } else {
@@ -535,10 +535,10 @@ mod linux_tests {
             file2_path.to_string_lossy().to_string(),
         ];
 
-        Clipboard::set_files(file_paths.clone());
+        ClipboardController::set_files(file_paths.clone());
         thread::sleep(Duration::from_millis(200));
 
-        let clipboard_data = Clipboard::data();
+        let clipboard_data = ClipboardController::data();
         let paths_returned: Vec<&str> = clipboard_data.lines().collect();
 
         let contains_file1 = paths_returned.contains(&file1_path.to_str().unwrap());
@@ -546,7 +546,7 @@ mod linux_tests {
 
         let _ = std::fs::remove_file(file1_path);
         let _ = std::fs::remove_file(file2_path);
-        Clipboard::set_text(&original_clipboard);
+        ClipboardController::set_text(&original_clipboard);
 
         if !clipboard_data.is_empty() {
             assert!(contains_file1, "Clipboard did not contain file 1");
@@ -726,7 +726,7 @@ fn test_virtual_coordinated_desktop_space() {
     let _lock = get_db_lock().lock().unwrap_or_else(|e| e.into_inner());
     use std::fs;
     use flow::config::{initialize_db, MonitorLayout, save_monitor_layout};
-    use flow::engine::{find_client_monitor_containing, find_closest_client_monitor};
+    use flow::engine::layout::{find_client_monitor_containing, find_closest_client_monitor};
     use flow::paths::get_db_path;
 
     // Backup DB
@@ -775,21 +775,23 @@ fn test_virtual_coordinated_desktop_space() {
     save_monitor_layout(&mon_b).unwrap();
 
     // 1. Test find_client_monitor_containing
+    let layouts = flow::config::get_all_monitor_layouts().unwrap();
+
     // Inside Monitor A
-    let found = find_client_monitor_containing(1500, 500);
+    let found = find_client_monitor_containing(1500, 500, &layouts);
     assert!(found.is_some());
     assert_eq!(found.unwrap().monitor_id, "client_display_1");
 
     // Inside Monitor B
-    let found = find_client_monitor_containing(3500, 500);
+    let found = find_client_monitor_containing(3500, 500, &layouts);
     assert!(found.is_some());
     assert_eq!(found.unwrap().monitor_id, "client_display_2");
 
     // Outside coordinates (dead space / host space)
-    let found = find_client_monitor_containing(500, 500);
+    let found = find_client_monitor_containing(500, 500, &layouts);
     assert!(found.is_none());
 
-    let found = find_client_monitor_containing(3000, 2000);
+    let found = find_client_monitor_containing(3000, 2000, &layouts);
     assert!(found.is_none());
 
     // 2. Test find_closest_client_monitor clamping fallback

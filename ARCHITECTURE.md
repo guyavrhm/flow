@@ -21,6 +21,9 @@ graph TD
     Main[src/main.rs] --> UI[src/ui/mod.rs]
     Main --> Engine[src/engine.rs]
     UI --> Engine
+    Engine --> Tracker[src/engine/tracker.rs]
+    Engine --> ClipboardMod[src/engine/clipboard.rs]
+    Engine --> Layout[src/engine/layout.rs]
     Engine --> Network[src/network]
     Engine --> Hardware[src/hardware]
     Network --> Protocol[src/network/protocol.rs]
@@ -31,9 +34,13 @@ graph TD
 ```
 
 * **[src/main.rs](src/main.rs):** Entry point. Initializes the SQLite DB cache, GTK (on Linux), and starts the `egui` native loop.
-* **[src/engine.rs](src/engine.rs):** The central state machine (`AppEngine`). Coordinates transitions between server and client modes, manages active connection records, and orchestrates tracking threads.
+* **[src/engine.rs](src/engine.rs):** Entry point for the coordinator engine state. Delegates tracking and clipboard sync to dedicated sub-modules.
+* **[src/engine/](src/engine/):** Engine sub-modules:
+  * **[layout.rs](src/engine/layout.rs):** Renders coordinate translation/projection, clamping, and monitor boundary queries.
+  * **[tracker.rs](src/engine/tracker.rs):** Performs low-latency edge tracking, KVM transitions, and hooks system mouse/keyboard events.
+  * **[clipboard.rs](src/engine/clipboard.rs):** Manages local clipboard change notifications, reassembly chunks, and streaming payload promises.
 * **[src/network/](src/network/):** Networking module stack:
-  * **[mod.rs](src/network/mod.rs):** Exposes network submodules and provides general utility functions (e.g. retrieving the local IP address).
+  * **[mod.rs](src/network/mod.rs):** Exposes network submodules, provides local IP utilities, and initializes the global asynchronous `TOKIO_RUNTIME`.
   * **[tcp.rs](src/network/tcp.rs):** Manages connection handshakes, screen metrics exchange, and clipboard synchronization.
   * **[udp.rs](src/network/udp.rs):** Runs the low-latency network pipeline for high-frequency input events.
   * **[protocol.rs](src/network/protocol.rs):** Defines network serialization structs (`InputEvent`, `ClipboardPayload`, `ScreenMetrics`).
@@ -166,21 +173,21 @@ Once decrypted, the payload follows a space-delimited text protocol:
 | Thread | Spawned by | Purpose / Role | Lifespan |
 |---|---|---|---|
 | **Main Thread (UI)** | System | Runs the `egui` / `winit` UI rendering loop (`eframe::run_native`). Handles user interactions, updates visual elements, and renders layout canvases. | Application lifetime |
-| **TCP Accept Thread** | tcp.rs | Binds to port 8118 and runs a blocking loop waiting to accept incoming client connections. | Active while Server is running |
-| **Client TCP Connections (1 per client)** | tcp.rs | Runs a blocking loop listening for incoming TCP payloads (handshake validation, screen metrics, and clipboard payloads) from a specific client. | Lifetime of client connection |
+| **TCP Accept Task** | tcp.rs | Runs an asynchronous loop on the global `TOKIO_RUNTIME` waiting to accept incoming client connections. | Active while Server is running |
+| **Client Connection Task (1 per client)** | tcp.rs | Runs an asynchronous task on the global `TOKIO_RUNTIME` listening for incoming TCP/TLS payloads (handshake validation, screen metrics, and clipboard payloads) from a specific client. | Lifetime of client connection |
 | **UDP Handshake Thread (1 per client)** | engine.rs | Created temporarily to wait for the client's UDP handshake packet to extract and store their remote UDP port, then terminates. | Transient (less than 3 seconds) |
-| **Edge Tracking Thread** | engine.rs | Runs a 10ms loop checking local mouse boundaries. When control shifts, it activates blocking system-level input hooks (listening for mouse/keyboard inputs) and packages them to UDP. | Active while Server is running |
-| **Clipboard Listener Thread** | mac.rs / win.rs / linux.rs | Detects local pasteboard updates natively (e.g. 250ms `changeCount` polling on macOS, window message loops or signals on Windows/Linux) and notifies the engine. | Active while Server is running |
+| **Edge Tracking Thread** | tracker.rs | Runs a 10ms loop checking local mouse boundaries. When control shifts, it activates blocking system-level input hooks (listening for mouse/keyboard inputs) and packages them to UDP. | Active while Server is running |
+| **Clipboard Listener Thread** | clipboard.rs | Detects local pasteboard updates natively (e.g. 250ms `changeCount` polling on macOS, window message loops or signals on Windows/Linux) and notifies the sync manager. | Active while Server is running |
 | **Engine Reload Thread** | mod.rs | Spawned briefly when the user hits "Save" to stop the engine and re-initialize socket bindings without freezing the UI thread. | Transient |
 
-### Client Mode Threads (Guest)
+### Client Mode Threads & Tasks (Guest)
 
-| Thread | Spawned by | Purpose / Role | Lifespan |
+| Thread / Task | Spawned by | Purpose / Role | Lifespan |
 |---|---|---|---|
 | **Main Thread (UI)** | System | Runs the `egui` interface and tray indicators. | Application lifetime |
-| **TCP Client Thread** | engine.rs | Runs a periodic reconnection loop that attempts to connect to the server's TCP socket every 2 seconds when disconnected, and runs a persistent blocking loop to receive incoming server clipboard packets once connected. | Active while Client is running |
+| **TCP Client Task** | tcp.rs | Runs an asynchronous loop on the global `TOKIO_RUNTIME` to receive incoming server clipboard packets once connected. | Active while Client is running |
 | **UDP Client Thread** | udp.rs | Listens on a UDP socket for real-time input events (`Move`, `KeyPress`, `Stop`), decrypts them, and immediately simulates them on the local OS. | Active while Client is connected |
-| **Clipboard Listener Thread** | mac.rs / win.rs / linux.rs | Detects local pasteboard updates natively and notifies the engine. | Active while Client is running |
+| **Clipboard Listener Thread** | clipboard.rs | Detects local pasteboard updates natively and notifies the sync manager. | Active while Client is running |
 
 ### Thread Communication & Shared Data
 
@@ -198,12 +205,20 @@ State variables are synchronized across thread boundaries using lock-protected r
 | **`udp_server`** | `Arc<Mutex<Option<UdpServer>>>` | Main UI Thread | Edge Tracker | Stores the server's UDP socket reference to send input event packets. |
 | **`CLIPBOARD_IGNORE_HASHES`** | `Lazy<Mutex<Vec<u64>>>` | TCP connection threads & FFI promise threads | Clipboard listener (`on_change` in engine.rs) | Stores hashes of recent network-received clipboard contents (both eager and lazy updates) to prevent network loopbacks. |
 | **`IN_SET_CLIPBOARD`** | `AtomicBool` | TCP connection threads | Clipboard listener | Guard variable set during eager sync updates to temporarily pause the clipboard change listener and prevent race condition loopbacks. |
+| **`offered_data`** | `Arc<Mutex<Option<OfferedData>>>` | Clipboard Monitor / TCP connection threads | TCP connection threads | Stores locally owned large clipboard offers waiting to be requested by remote peers. |
 
 ---
 
 ## 6. OS-Specific FFI & Hardware Integration
 
-`flow` uses the src/hardware module as an abstraction layer to standardize cross-platform hardware events and OS windowing hooks (e.g., Win32, Cocoa/Quartz, X11).
+`flow` uses the `src/hardware` module as a Hardware Abstraction Layer (HAL) to standardize cross-platform hardware events and OS windowing hooks (e.g., Win32, Cocoa/Quartz, X11). The HAL is defined using four key traits in [src/hardware/mod.rs](file:///Users/guyavraham/flow/src/hardware/mod.rs):
+
+*   **`MouseSimulator`**: Standardizes mouse cursor warping, scrolling, and button clicks.
+*   **`KeyboardSimulator`**: Standardizes keystroke injection.
+*   **`InputHookListener`**: Handles low-level OS hooks to intercept and swallow/suppress mouse and keyboard inputs when KVM redirection is active.
+*   **`ClipboardManager`**: Manages clipboard reading/writing, loopback hashes, and lazy promise-rendering callbacks.
+
+Low-level OS FFI imports, Carbon/Quartz wrappers, and synchronous platform-specific FFI callbacks (e.g., Cocoa `NSPasteboard` owners) are isolated into native driver submodules (such as [src/hardware/mac/sys.rs](file:///Users/guyavraham/flow/src/hardware/mac/sys.rs)).
 
 #### 1. Screen & Keyboard Initialization Functions
 * **`pub fn get_screeninfo() -> (i32, i32)`**
@@ -345,12 +360,13 @@ impl MouseListener {
 
 ### Adding a New OS Backend
 
-To support a new operating system or windowing system, implement a new backend module using these steps:
+To support a new operating system or windowing system, implement a new backend driver module using these steps:
 
 1. Create the source file under the hardware directory: `src/hardware/<your_os>.rs`.
-2. Implement all structures and functions detailed above (e.g. `Clipboard`, `ClipboardListener`, controllers, etc.) inside your new `src/hardware/<your_os>.rs` file.
-3. Implement `pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize)` within your new file to handle registering the platform-specific lazy promise owner.
-4. Expose the new module in `src/hardware/mod.rs` using conditional compilation attributes:
+2. Implement the HAL traits (`MouseSimulator`, `KeyboardSimulator`, `InputHookListener`, and `ClipboardManager`) inside your new file.
+3. Expose the concrete driver implementations (`Clipboard`, `KeyboardController`, `KeyboardListener`, `MouseController`, `MouseListener`, `ClipboardListener`, and screen metrics helpers) that implement these traits.
+4. Implement `pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize)` within your new file to handle registering the platform-specific lazy promise owner.
+5. Expose the new module in `src/hardware/mod.rs` using conditional compilation attributes:
 
 ```rust
 #[cfg(target_os = "<your_os>")]
