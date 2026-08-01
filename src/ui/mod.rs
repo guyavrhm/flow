@@ -2,8 +2,8 @@ pub mod canvas;
 pub mod tray;
 
 use crate::config::{
-    ENCRYPTION_OFF, PC_CLIENT, PC_SERVER, SettingsData, get_settings, remove_screen,
-    save_settings, update_screen,
+    ENCRYPTION_OFF, PC_CLIENT, PC_SERVER, SettingsData, get_settings,
+    save_settings,
 };
 use crate::engine::AppEngine;
 use crate::network::get_local_ip;
@@ -82,12 +82,21 @@ impl FlowApp {
             return;
         }
 
-        let computed = self.canvas.compute_attachments();
-        for (name, att) in computed {
-            if let Err(e) = update_screen(&name, &att) {
-                log::error!("UI: Failed to update screen layout for {} in DB: {:?}", name, e);
-            } else {
-                log::debug!("UI: Updated screen attachments for {}", name);
+        for screen in self.canvas.screens.values() {
+            let layout = crate::config::MonitorLayout {
+                monitor_id: screen.monitor_id.clone(),
+                host: screen.host.clone(),
+                monitor_name: screen.monitor_name.clone(),
+                x: screen.x as i32,
+                y: screen.y as i32,
+                width: screen.w as i32,
+                height: screen.h as i32,
+                scale_factor: screen.scale_factor,
+                local_x: screen.local_x,
+                local_y: screen.local_y,
+            };
+            if let Err(e) = crate::config::save_monitor_layout(&layout) {
+                log::error!("UI: Failed to save monitor layout to DB: {:?}", e);
             }
         }
 
@@ -235,7 +244,11 @@ impl eframe::App for FlowApp {
                             if let Ok(s) = get_settings() {
                                 self.settings = s;
                             }
-                            self.canvas.load_from_db(&Vec::new());
+                            let active_ips = {
+                                let clients = self.engine.active_clients.lock().unwrap();
+                                clients.keys().cloned().collect::<Vec<String>>()
+                            };
+                            self.canvas.load_from_db(&active_ips);
                             self.status_msg = "Settings reloaded".to_string();
                         }
                         if ui.button("Hide Window").clicked() {
@@ -272,39 +285,47 @@ impl eframe::App for FlowApp {
                     ui.add_space(5.0);
 
                     ui.horizontal(|ui| {
-                        let selected = self.canvas.draw(ui);
+                        let active_ips = {
+                            let clients = self.engine.active_clients.lock().unwrap();
+                            clients.keys().cloned().collect::<Vec<String>>()
+                        };
+                        for screen in self.canvas.screens.values_mut() {
+                            screen.is_connected = screen.host == "main" || active_ips.contains(&screen.host);
+                        }
+
+                        let _ = self.canvas.draw(ui);
 
                         if self.show_trash_list {
                             ui.vertical(|ui| {
-                                ui.label("Trash Bin (Double-Click to Delete):");
+                                ui.label("Trash Bin (Double-Click to Delete Host):");
                                 egui::ScrollArea::vertical()
                                     .max_height(200.0)
                                     .show(ui, |ui| {
+                                        let mut hosts = self.canvas.screens.values()
+                                            .map(|s| s.host.clone())
+                                            .filter(|h| h != "main")
+                                            .collect::<Vec<String>>();
+                                        hosts.sort();
+                                        hosts.dedup();
+
                                         let mut to_remove = None;
-                                        for name in self.canvas.screens.keys() {
-                                            if name != "main" {
-                                                if ui
-                                                    .selectable_label(
-                                                        self.canvas.selected_screen.as_ref()
-                                                            == Some(name),
-                                                        name,
-                                                    )
-                                                    .double_clicked()
-                                                {
-                                                    to_remove = Some(name.clone());
-                                                }
+                                        for host in hosts {
+                                            let is_sel = self.canvas.selected_screen.as_ref()
+                                                .map_or(false, |id| self.canvas.screens.get(id).map_or(false, |s| s.host == host));
+                                            if ui
+                                                .selectable_label(is_sel, &host)
+                                                .double_clicked()
+                                            {
+                                                to_remove = Some(host);
                                             }
                                         }
-                                        if let Some(r_name) = to_remove {
-                                            log::info!("UI: Deleting screen: {}", r_name);
-                                            if let Err(e) = remove_screen(&r_name) {
-                                                log::error!("UI: Failed to remove screen {} from DB: {:?}", r_name, e);
+                                        if let Some(r_host) = to_remove {
+                                            log::info!("UI: Deleting host layouts: {}", r_host);
+                                            if let Err(e) = crate::config::remove_monitor_layouts_by_host(&r_host) {
+                                                log::error!("UI: Failed to remove host {} from DB: {:?}", r_host, e);
                                             }
-                                            self.canvas.screens.remove(&r_name);
-                                            if self.canvas.selected_screen.as_ref() == Some(&r_name)
-                                            {
-                                                self.canvas.selected_screen = None;
-                                            }
+                                            self.canvas.screens.retain(|_, s| s.host != r_host);
+                                            self.canvas.selected_screen = None;
                                         }
                                     });
                             });

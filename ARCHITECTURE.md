@@ -42,10 +42,10 @@ graph TD
   * **[mod.rs](src/hardware/mod.rs):** Manages conditional compilation (`#[cfg(target_os)]`) to dynamically select and export the correct OS-specific FFI backend at build time.
   * **Platform Backends:** Platform-specific FFI modules (`mac.rs`, `win.rs`, `linux.rs`) implementing OS-specific hooks and input injection.
 * **[src/crypto.rs](src/crypto.rs):** Handles self-signed X.509 certificate generation/loading, SHA-256 fingerprint computation, sliding window replay protection for UDP packets, and symmetric ChaCha20-Poly1305 encryption/decryption.
-* **[src/config.rs](src/config.rs):** SQLite database layer (`rusqlite`) for saving settings and screen-arrangement layout mapping.
+* **[src/config.rs](src/config.rs):** SQLite database layer (`rusqlite`) for saving settings and global monitor layouts.
 * **[src/ui/](src/ui/):** Immediate-mode UI layout modules:
   * **[src/ui/mod.rs](src/ui/mod.rs):** Coordinates the desktop configurations view, polls background status variables, manages tray menu interactions, and executes async engine reloads when settings are saved.
-  * **[src/ui/canvas.rs](src/ui/canvas.rs):** Renders the interactive layout map panel where users drag, drop, and snap virtual monitor edges.
+  * **[src/ui/canvas.rs](src/ui/canvas.rs):** Renders the interactive layout map panel where users drag, drop, and snap virtual monitor borders in the coordinated workspace.
   * **[src/ui/tray.rs](src/ui/tray.rs):** Hooks native platform system tray icons, managing connection status visuals (Checkmark vs. Error indicators).
 
 ---
@@ -119,7 +119,7 @@ To demarcate JSON payloads sent over the stream, each message is transmitted wit
 2. **UDP Session Key Configuration**:
    * Immediately after TLS is established, the Server generates a random 32-byte key and 4-byte salt, serializing them into a `UdpSessionConfig` message sent to the client.
 3. **Screen Metrics Exchange**:
-   - The client responds by sending its screen dimensions serialized as JSON in `ScreenMetrics` format.
+   - The client responds by sending its multi-monitor configuration and DPI scaling properties serialized as JSON in `ScreenMetrics` format.
 4. **Control & Clipboard Channel**:
     - Eager Syncing: For payloads <= 5MB, a `ClipboardPayload::Text` or `ClipboardPayload::Files` is serialized to JSON and transmitted immediately over the TLS stream.
     - Lazy Syncing (Promises): For payloads > 5MB, the source client/server registers the content locally and broadcasts a `ClipboardPayload::Offer` containing a unique ID, total size, and format.
@@ -190,7 +190,9 @@ State variables are synchronized across thread boundaries using lock-protected r
 |---|---|---|---|---|
 | **`settings`** | `Arc<Mutex<SettingsData>>` | Main UI Thread | Edge Tracker, TCP/UDP threads | Stores mode (Server/Client), Server IP, and encryption password. |
 | **`is_running`** | `Arc<Mutex<bool>>` | Main UI Thread | All background threads | Controls engine startup, teardown, and reloading loops. |
-| **`active_clients`** | `Arc<Mutex<HashMap<...>>>` | TCP connection threads | Edge Tracker | Tracks connected client metrics, screen attachments, and UDP endpoints. |
+| **`global_mouse_x`** | `Arc<Mutex<i32>>` | Edge Tracker, Mouse Hook | Edge Tracker | Tracks the virtual mouse X coordinate in the global coordinated desktop space. |
+| **`global_mouse_y`** | `Arc<Mutex<i32>>` | Edge Tracker, Mouse Hook | Edge Tracker | Tracks the virtual mouse Y coordinate in the global coordinated desktop space. |
+| **`active_clients`** | `Arc<Mutex<HashMap<...>>>` | TCP connection threads | Edge Tracker | Tracks connected client monitors configuration, DPI scaling parameters, and UDP endpoints. |
 | **`current_controlled`** | `Arc<Mutex<String>>` | Edge Tracker | OS Input Hooks | Tracks which screen holds input focus (`"main"` or client IP). |
 | **`is_connected`** | `Arc<Mutex<bool>>` | TCP threads | Main UI Thread | Drives visual tray connection status indicators ($V$ / $X$). |
 | **`udp_server`** | `Arc<Mutex<Option<UdpServer>>>` | Main UI Thread | Edge Tracker | Stores the server's UDP socket reference to send input event packets. |
@@ -206,6 +208,8 @@ State variables are synchronized across thread boundaries using lock-protected r
 #### 1. Screen & Keyboard Initialization Functions
 * **`pub fn get_screeninfo() -> (i32, i32)`**
   * Returns the primary screen width and height in pixels.
+* **`pub fn get_monitors() -> Vec<MonitorInfo>`**
+  * Returns the active display geometries (DPI scale factors, bounds, and names) for the host machine.
 * **`pub fn init_keyboard_layout()`**
   * Invoked on the main thread during app startup to cache keyboard layouts if required by the target OS.
 

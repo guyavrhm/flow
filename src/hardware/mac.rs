@@ -58,6 +58,13 @@ pub type CGEventTapCallBack = extern "C" fn(
 unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
     fn CGDisplayBounds(display: u32) -> CGRect;
+    fn CGGetActiveDisplayList(
+        max_displays: u32,
+        active_displays: *mut u32,
+        display_count: *mut u32,
+    ) -> i32;
+    fn CGDisplayPixelsWide(display: u32) -> usize;
+    fn CGDisplayPixelsHigh(display: u32) -> usize;
     fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
     fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
     fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
@@ -357,6 +364,51 @@ pub fn get_screeninfo() -> (i32, i32) {
         let bounds = CGDisplayBounds(display);
         (bounds.size.width as i32, bounds.size.height as i32)
     }
+}
+
+pub fn get_monitors() -> Vec<crate::network::protocol::MonitorInfo> {
+    let mut monitors = Vec::new();
+    unsafe {
+        let mut active_displays = [0u32; 32];
+        let mut display_count = 0u32;
+        if CGGetActiveDisplayList(32, active_displays.as_mut_ptr(), &mut display_count) == 0 {
+            for i in 0..display_count as usize {
+                let display_id = active_displays[i];
+                let bounds = CGDisplayBounds(display_id);
+                let phys_w = CGDisplayPixelsWide(display_id);
+                let _phys_h = CGDisplayPixelsHigh(display_id);
+
+                let scale_factor = if bounds.size.width > 0.0 {
+                    phys_w as f64 / bounds.size.width
+                } else {
+                    1.0
+                };
+
+                monitors.push(crate::network::protocol::MonitorInfo {
+                    name: format!("Display {}", i),
+                    local_x: bounds.origin.x as i32,
+                    local_y: bounds.origin.y as i32,
+                    width: bounds.size.width as i32,
+                    height: bounds.size.height as i32,
+                    scale_factor,
+                });
+            }
+        }
+    }
+
+    if monitors.is_empty() {
+        let (w, h) = get_screeninfo();
+        monitors.push(crate::network::protocol::MonitorInfo {
+            name: "Main Display".to_string(),
+            local_x: 0,
+            local_y: 0,
+            width: w,
+            height: h,
+            scale_factor: 1.0,
+        });
+    }
+
+    monitors
 }
 
 

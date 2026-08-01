@@ -1,21 +1,25 @@
-use crate::config::{ScreenAttachments, get_screens};
+use crate::config::get_all_monitor_layouts;
 use eframe::egui;
 use std::collections::HashMap;
 
-pub const DEFAULT_WIDTH: f32 = 120.0;
-pub const DEFAULT_HEIGHT: f32 = 80.0;
+pub const RENDER_SCALE: f32 = 0.08; // Scaling factor for rendering logical pixels on egui canvas
 
 #[derive(Clone, Debug)]
-pub struct EditorScreen {
-    pub name: String,
+pub struct EditorMonitor {
+    pub monitor_id: String,
+    pub host: String,
+    pub monitor_name: String,
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    pub scale_factor: f64,
+    pub local_x: i32,
+    pub local_y: i32,
     pub is_connected: bool,
 }
 
-impl EditorScreen {
+impl EditorMonitor {
     pub fn center_x(&self) -> f32 {
         self.x + self.w / 2.0
     }
@@ -24,7 +28,7 @@ impl EditorScreen {
         self.y + self.h / 2.0
     }
 
-    pub fn distance(&self, other: &EditorScreen) -> f32 {
+    pub fn distance(&self, other: &EditorMonitor) -> f32 {
         ((self.center_x() - other.center_x()).powi(2)
             + (self.center_y() - other.center_y()).powi(2))
         .sqrt()
@@ -32,7 +36,7 @@ impl EditorScreen {
 }
 
 pub struct ScreenLayoutCanvas {
-    pub screens: HashMap<String, EditorScreen>,
+    pub screens: HashMap<String, EditorMonitor>,
     pub selected_screen: Option<String>,
 }
 
@@ -46,66 +50,22 @@ impl ScreenLayoutCanvas {
 
     pub fn load_from_db(&mut self, active_clients: &Vec<String>) {
         self.screens.clear();
-        if let Ok(db_screens) = get_screens() {
-            let mut screen_positions = HashMap::new();
-            screen_positions.insert("main".to_string(), (200.0, 200.0));
-
-            let mut queue = vec!["main".to_string()];
-            let mut visited = std::collections::HashSet::new();
-            visited.insert("main".to_string());
-
-            while let Some(current_name) = queue.pop() {
-                if let Some(&(curr_x, curr_y)) = screen_positions.get(&current_name) {
-                    if let Some(db_scr) = db_screens.iter().find(|s| s.address == current_name) {
-                        if let Some(ref t) = db_scr.top {
-                            if !visited.contains(t) {
-                                screen_positions
-                                    .insert(t.clone(), (curr_x, curr_y - DEFAULT_HEIGHT));
-                                visited.insert(t.clone());
-                                queue.push(t.clone());
-                            }
-                        }
-                        if let Some(ref b) = db_scr.bottom {
-                            if !visited.contains(b) {
-                                screen_positions
-                                    .insert(b.clone(), (curr_x, curr_y + DEFAULT_HEIGHT));
-                                visited.insert(b.clone());
-                                queue.push(b.clone());
-                            }
-                        }
-                        if let Some(ref l) = db_scr.left {
-                            if !visited.contains(l) {
-                                screen_positions
-                                    .insert(l.clone(), (curr_x - DEFAULT_WIDTH, curr_y));
-                                visited.insert(l.clone());
-                                queue.push(l.clone());
-                            }
-                        }
-                        if let Some(ref r) = db_scr.right {
-                            if !visited.contains(r) {
-                                screen_positions
-                                    .insert(r.clone(), (curr_x + DEFAULT_WIDTH, curr_y));
-                                visited.insert(r.clone());
-                                queue.push(r.clone());
-                            }
-                        }
-                    }
-                }
-            }
-
-            for db_scr in db_screens {
-                let name = db_scr.address;
-                let is_connected = name == "main" || active_clients.contains(&name);
-                let (x, y) = screen_positions.remove(&name).unwrap_or((50.0, 50.0));
-
+        if let Ok(layouts) = get_all_monitor_layouts() {
+            for lay in layouts {
+                let is_connected = lay.host == "main" || active_clients.contains(&lay.host);
                 self.screens.insert(
-                    name.clone(),
-                    EditorScreen {
-                        name,
-                        x,
-                        y,
-                        w: DEFAULT_WIDTH,
-                        h: DEFAULT_HEIGHT,
+                    lay.monitor_id.clone(),
+                    EditorMonitor {
+                        monitor_id: lay.monitor_id,
+                        host: lay.host,
+                        monitor_name: lay.monitor_name,
+                        x: lay.x as f32,
+                        y: lay.y as f32,
+                        w: lay.width as f32,
+                        h: lay.height as f32,
+                        scale_factor: lay.scale_factor,
+                        local_x: lay.local_x,
+                        local_y: lay.local_y,
                         is_connected,
                     },
                 );
@@ -120,6 +80,34 @@ impl ScreenLayoutCanvas {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
 
+        // Find the main monitor at (0,0) (or any server monitor) to center the grid
+        let main_screen = self
+            .screens
+            .values()
+            .find(|s| s.host == "main" && s.x == 0.0 && s.y == 0.0)
+            .or_else(|| self.screens.values().find(|s| s.host == "main"))
+            .cloned();
+
+        let (offset_x, offset_y) = if let Some(ref ms) = main_screen {
+            (
+                250.0 - (ms.w * RENDER_SCALE) / 2.0,
+                200.0 - (ms.h * RENDER_SCALE) / 2.0,
+            )
+        } else {
+            (250.0 - 60.0, 200.0 - 40.0)
+        };
+
+        // Draw cross at local origin center point
+        let origin_pt = rect.min + egui::vec2(offset_x, offset_y);
+        painter.line_segment(
+            [origin_pt - egui::vec2(15.0, 0.0), origin_pt + egui::vec2(15.0, 0.0)],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+        );
+        painter.line_segment(
+            [origin_pt - egui::vec2(0.0, 15.0), origin_pt + egui::vec2(0.0, 15.0)],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+        );
+
         let mut dragged_screen = None;
         let mut drag_delta = egui::Vec2::ZERO;
 
@@ -127,10 +115,10 @@ impl ScreenLayoutCanvas {
             drag_delta = response.drag_delta();
         }
 
-        for (name, screen) in self.screens.iter_mut() {
+        for (id, screen) in self.screens.iter_mut() {
             let screen_rect = egui::Rect::from_min_size(
-                rect.min + egui::vec2(screen.x, screen.y),
-                egui::vec2(screen.w, screen.h),
+                rect.min + egui::vec2(offset_x + screen.x * RENDER_SCALE, offset_y + screen.y * RENDER_SCALE),
+                egui::vec2(screen.w * RENDER_SCALE, screen.h * RENDER_SCALE),
             );
 
             if response.dragged()
@@ -138,17 +126,19 @@ impl ScreenLayoutCanvas {
                     .input(|i| i.pointer.hover_pos())
                     .map_or(false, |pos| screen_rect.contains(pos))
             {
-                if name != "main" {
-                    dragged_screen = Some(name.clone());
+                if screen.host != "main" {
+                    dragged_screen = Some(id.clone());
                 }
             }
 
-            let is_selected = self.selected_screen.as_ref() == Some(name);
+            let is_selected = self.selected_screen.as_ref() == Some(id);
 
-            let fill_color = if screen.is_connected {
-                egui::Color32::from_rgb(140, 220, 140)
+            let fill_color = if screen.host == "main" {
+                egui::Color32::from_rgb(100, 149, 237) // Cornflower Blue for Host
+            } else if screen.is_connected {
+                egui::Color32::from_rgb(140, 220, 140) // Connected client
             } else {
-                egui::Color32::from_rgb(190, 190, 190)
+                egui::Color32::from_rgb(190, 190, 190) // Offline client
             };
 
             let stroke_color = if is_selected {
@@ -166,28 +156,32 @@ impl ScreenLayoutCanvas {
                 egui::Stroke::new(stroke_width, stroke_color),
             );
 
-            let text_pos = screen_rect.center() - egui::vec2(15.0, 5.0);
+            // Text info on screen block
+            let text = format!("{}\n{}", screen.host, screen.monitor_name);
+            let text_pos = screen_rect.min + egui::vec2(5.0, 5.0);
             painter.text(
                 text_pos,
                 egui::Align2::LEFT_TOP,
-                &screen.name,
-                egui::FontId::proportional(14.0),
+                text,
+                egui::FontId::proportional(11.0),
                 egui::Color32::BLACK,
             );
         }
 
-        if let Some(name) = dragged_screen {
-            self.selected_screen = Some(name.clone());
-            if let Some(screen) = self.screens.get_mut(&name) {
-                screen.x += drag_delta.x;
-                screen.y += drag_delta.y;
+        if let Some(id) = dragged_screen {
+            self.selected_screen = Some(id.clone());
+            if let Some(screen) = self.screens.get_mut(&id) {
+                screen.x += drag_delta.x / RENDER_SCALE;
+                screen.y += drag_delta.y / RENDER_SCALE;
             }
         }
 
         if response.drag_released() {
-            if let Some(name) = self.selected_screen.clone() {
-                if name != "main" {
-                    self.snap_screen(&name);
+            if let Some(id) = self.selected_screen.clone() {
+                if let Some(screen) = self.screens.get(&id) {
+                    if screen.host != "main" {
+                        self.snap_screen(&id);
+                    }
                 }
             }
         }
@@ -195,13 +189,13 @@ impl ScreenLayoutCanvas {
         if response.clicked() {
             let mut clicked = None;
             if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
-                for (name, screen) in self.screens.iter() {
+                for (id, screen) in self.screens.iter() {
                     let screen_rect = egui::Rect::from_min_size(
-                        rect.min + egui::vec2(screen.x, screen.y),
-                        egui::vec2(screen.w, screen.h),
+                        rect.min + egui::vec2(offset_x + screen.x * RENDER_SCALE, offset_y + screen.y * RENDER_SCALE),
+                        egui::vec2(screen.w * RENDER_SCALE, screen.h * RENDER_SCALE),
                     );
                     if screen_rect.contains(pos) {
-                        clicked = Some(name.clone());
+                        clicked = Some(id.clone());
                         break;
                     }
                 }
@@ -212,17 +206,17 @@ impl ScreenLayoutCanvas {
         self.selected_screen.clone()
     }
 
-    fn snap_screen(&mut self, name: &str) {
+    fn snap_screen(&mut self, id: &str) {
         let mut target = None;
         let mut min_dist = f32::MAX;
 
-        let screen_val = match self.screens.get(name) {
+        let screen_val = match self.screens.get(id) {
             Some(s) => s.clone(),
             None => return,
         };
 
-        for (other_name, other) in self.screens.iter() {
-            if other_name != name {
+        for (other_id, other) in self.screens.iter() {
+            if other_id != id {
                 let d = screen_val.distance(other);
                 if d < min_dist {
                     min_dist = d;
@@ -232,69 +226,44 @@ impl ScreenLayoutCanvas {
         }
 
         if let Some(closest) = target {
-            let relative_x = screen_val.center_x() - closest.center_x();
-            let relative_y = screen_val.center_y() - closest.center_y();
+            let threshold = 40.0; // 40 logical pixels snapping boundary
 
             let mut final_x = screen_val.x;
             let mut final_y = screen_val.y;
 
-            if relative_x.abs() > relative_y.abs() {
-                if relative_x > 0.0 {
-                    final_x = closest.x + closest.w;
-                    final_y = closest.y;
-                } else {
-                    final_x = closest.x - screen_val.w;
+            // Snap A's left edge to B's right edge
+            if (screen_val.x - (closest.x + closest.w)).abs() < threshold {
+                final_x = closest.x + closest.w;
+                if (screen_val.y - closest.y).abs() < threshold {
                     final_y = closest.y;
                 }
-            } else {
-                if relative_y > 0.0 {
+            }
+            // Snap A's right edge to B's left edge
+            else if ((screen_val.x + screen_val.w) - closest.x).abs() < threshold {
+                final_x = closest.x - screen_val.w;
+                if (screen_val.y - closest.y).abs() < threshold {
+                    final_y = closest.y;
+                }
+            }
+            // Snap A's top edge to B's bottom edge
+            else if (screen_val.y - (closest.y + closest.h)).abs() < threshold {
+                final_y = closest.y + closest.h;
+                if (screen_val.x - closest.x).abs() < threshold {
                     final_x = closest.x;
-                    final_y = closest.y + closest.h;
-                } else {
+                }
+            }
+            // Snap A's bottom edge to B's top edge
+            else if ((screen_val.y + screen_val.h) - closest.y).abs() < threshold {
+                final_y = closest.y - screen_val.h;
+                if (screen_val.x - closest.x).abs() < threshold {
                     final_x = closest.x;
-                    final_y = closest.y - screen_val.h;
                 }
             }
 
-            if let Some(s) = self.screens.get_mut(name) {
+            if let Some(s) = self.screens.get_mut(id) {
                 s.x = final_x;
                 s.y = final_y;
             }
         }
-    }
-
-    pub fn compute_attachments(&self) -> HashMap<String, ScreenAttachments> {
-        let mut results = HashMap::new();
-        for (name, screen) in self.screens.iter() {
-            let mut att = ScreenAttachments {
-                address: name.clone(),
-                top: None,
-                right: None,
-                bottom: None,
-                left: None,
-            };
-
-            for (other_name, other) in self.screens.iter() {
-                if other_name == name {
-                    continue;
-                }
-
-                if (screen.x - other.x - other.w).abs() < 5.0 && (screen.y - other.y).abs() < 5.0 {
-                    att.left = Some(other_name.clone());
-                }
-                if (other.x - screen.x - screen.w).abs() < 5.0 && (screen.y - other.y).abs() < 5.0 {
-                    att.right = Some(other_name.clone());
-                }
-                if (screen.y - other.y - other.h).abs() < 5.0 && (screen.x - other.x).abs() < 5.0 {
-                    att.top = Some(other_name.clone());
-                }
-                if (other.y - screen.y - screen.h).abs() < 5.0 && (screen.x - other.x).abs() < 5.0 {
-                    att.bottom = Some(other_name.clone());
-                }
-            }
-
-            results.insert(name.clone(), att);
-        }
-        results
     }
 }

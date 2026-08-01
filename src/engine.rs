@@ -31,11 +31,8 @@ use std::time::Duration;
 
 pub struct ClientInfo {
     pub ip: String,
-    pub width: i32,
-    pub height: i32,
-    pub mouse_x: i32,
-    pub mouse_y: i32,
-    pub attachments: ScreenAttachments,
+    pub monitors: Vec<crate::network::protocol::MonitorInfo>,
+    pub uses_physical_pixels: bool,
     pub udp_addr: Option<SocketAddr>,
     pub cryptor: crate::crypto::UdpCryptor,
     pub udp_seq: u64,
@@ -45,11 +42,13 @@ pub struct ClientInfo {
 pub struct AppEngine {
     pub settings: Arc<Mutex<SettingsData>>,
     pub is_running: Arc<Mutex<bool>>,
+    pub global_mouse_x: Arc<Mutex<i32>>,
+    pub global_mouse_y: Arc<Mutex<i32>>,
 
     // Server resources
     tcp_server: Arc<TcpServer>,
     udp_server: Arc<Mutex<Option<UdpServer>>>,
-    active_clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
+    pub active_clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
     current_controlled: Arc<Mutex<String>>, // "main" or client IP
     mouse_listener: Arc<Mutex<Option<MouseListener>>>,
     keyboard_listener: Arc<Mutex<Option<KeyboardListener>>>,
@@ -76,6 +75,8 @@ impl AppEngine {
                 encryption: 0,
             }))),
             is_running: Arc::new(Mutex::new(false)),
+            global_mouse_x: Arc::new(Mutex::new(0)),
+            global_mouse_y: Arc::new(Mutex::new(0)),
             tcp_server: Arc::new(TcpServer::new()),
             udp_server: Arc::new(Mutex::new(None)),
             active_clients: Arc::new(Mutex::new(HashMap::new())),
@@ -183,6 +184,29 @@ impl AppEngine {
     fn start_server(&self, settings: SettingsData) {
         log::info!("Starting Server Mode");
 
+        // Initialize server monitors in DB if monitors table is empty of main screens
+        if let Ok(server_mons) = crate::config::get_all_monitor_layouts() {
+            let has_server_mon = server_mons.iter().any(|m| m.host == "main");
+            if !has_server_mon {
+                let local_mons = crate::hardware::get_monitors();
+                for m in local_mons {
+                    let layout = crate::config::MonitorLayout {
+                        monitor_id: format!("main_{}", m.name),
+                        host: "main".to_string(),
+                        monitor_name: m.name,
+                        x: m.local_x,
+                        y: m.local_y,
+                        width: m.width,
+                        height: m.height,
+                        scale_factor: m.scale_factor,
+                        local_x: m.local_x,
+                        local_y: m.local_y,
+                    };
+                    let _ = crate::config::save_monitor_layout(&layout);
+                }
+            }
+        }
+
         let active_clients = self.active_clients.clone();
         let current_controlled = self.current_controlled.clone();
         let is_connected = self.is_connected.clone();
@@ -212,6 +236,43 @@ impl AppEngine {
                 *conn = true;
             }
 
+            // Register client monitors in database
+            for m in &metrics.monitors {
+                let monitor_id = format!("{}_{}", ip, m.name);
+                let mut existing_layout = None;
+                if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
+                    existing_layout = layouts.into_iter().find(|l| l.monitor_id == monitor_id);
+                }
+
+                if let Some(mut lay) = existing_layout {
+                    lay.width = m.width;
+                    lay.height = m.height;
+                    lay.scale_factor = m.scale_factor;
+                    lay.local_x = m.local_x;
+                    lay.local_y = m.local_y;
+                    let _ = crate::config::save_monitor_layout(&lay);
+                } else {
+                    let max_x = if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
+                        layouts.iter().map(|l| l.x + l.width).max().unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let layout = crate::config::MonitorLayout {
+                        monitor_id,
+                        host: ip.clone(),
+                        monitor_name: m.name.clone(),
+                        x: max_x + 50,
+                        y: 0,
+                        width: m.width,
+                        height: m.height,
+                        scale_factor: m.scale_factor,
+                        local_x: m.local_x,
+                        local_y: m.local_y,
+                    };
+                    let _ = crate::config::save_monitor_layout(&layout);
+                }
+            }
+
             // Perform UDP Handshake in a background task
             let udp_server_task = udp_server_handshake.clone();
             let active_clients_task = active_clients_handshake.clone();
@@ -221,24 +282,12 @@ impl AppEngine {
             thread::spawn(move || {
                 if let Ok(udp_addr) = udp_server_task.listen_handshake(&client_ip, &cryptor_clone) {
                     let mut clients = active_clients_task.lock().unwrap();
-                    let attachments =
-                        get_attachments(&client_ip).unwrap_or_else(|_| ScreenAttachments {
-                            address: client_ip.clone(),
-                            top: None,
-                            right: None,
-                            bottom: None,
-                            left: None,
-                        });
-
                     clients.insert(
                         client_ip.clone(),
                         ClientInfo {
                             ip: client_ip,
-                            width: metrics.width,
-                            height: metrics.height,
-                            mouse_x: metrics.width / 2,
-                            mouse_y: metrics.height / 2,
-                            attachments,
+                            monitors: metrics.monitors.clone(),
+                            uses_physical_pixels: metrics.uses_physical_pixels,
                             udp_addr: Some(udp_addr),
                             cryptor: cryptor_clone,
                             udp_seq: 0,
@@ -383,10 +432,11 @@ impl AppEngine {
         let mouse_listener = self.mouse_listener.clone();
         let keyboard_listener = self.keyboard_listener.clone();
         let udp_server = self.udp_server.clone();
+        let global_mouse_x = self.global_mouse_x.clone();
+        let global_mouse_y = self.global_mouse_y.clone();
 
         thread::spawn(move || {
             let mouse_ctrl = MouseController::new();
-            let server_metrics = get_screeninfo();
 
             while *is_running.lock().unwrap() {
                 thread::sleep(Duration::from_millis(10));
@@ -396,100 +446,240 @@ impl AppEngine {
                     *curr == "main"
                 };
 
-                let mut next_controlled: Option<String> = None;
-                let mut enter_pos = (0, 0);
-
                 if is_main {
                     // Track local mouse coordinates
-                    let pos = mouse_ctrl.position();
-                    let main_attachments =
-                        get_attachments("main").unwrap_or_else(|_| ScreenAttachments {
-                            address: "main".to_string(),
-                            top: None,
-                            right: None,
-                            bottom: None,
-                            left: None,
-                        });
+                    let pos = mouse_ctrl.position(); // local coordinates (lx, ly)
+                    
+                    // Retrieve local monitors (server monitors)
+                    let local_mons = crate::hardware::get_monitors();
+                    // Let's find which monitor containing the mouse
+                    let mut found_mon = None;
+                    for m in &local_mons {
+                        if pos.0 >= m.local_x && pos.0 < m.local_x + m.width
+                            && pos.1 >= m.local_y && pos.1 < m.local_y + m.height {
+                            found_mon = Some(m.clone());
+                            break;
+                        }
+                    }
+                    // Fallback to first if none contains the coordinate
+                    let active_mon = found_mon.unwrap_or_else(|| {
+                        local_mons.first().cloned().unwrap_or(crate::network::protocol::MonitorInfo {
+                            name: "Main Display".to_string(),
+                            local_x: 0,
+                            local_y: 0,
+                            width: 1920,
+                            height: 1080,
+                            scale_factor: 1.0,
+                        })
+                    });
 
+                    // Query the DB coordinate layout for this server monitor
+                    let db_mon = crate::config::get_all_monitor_layouts().ok().and_then(|lays| {
+                        lays.into_iter().find(|l| l.host == "main" && l.monitor_name == active_mon.name)
+                    }).unwrap_or_else(|| crate::config::MonitorLayout {
+                        monitor_id: format!("main_{}", active_mon.name),
+                        host: "main".to_string(),
+                        monitor_name: active_mon.name.clone(),
+                        x: active_mon.local_x,
+                        y: active_mon.local_y,
+                        width: active_mon.width,
+                        height: active_mon.height,
+                        scale_factor: active_mon.scale_factor,
+                        local_x: active_mon.local_x,
+                        local_y: active_mon.local_y,
+                    });
+
+                    // Compute global coordinate (gx, gy)
+                    let gx = db_mon.x + (pos.0 - active_mon.local_x);
+                    let gy = db_mon.y + (pos.1 - active_mon.local_y);
+                    
+                    {
+                        *global_mouse_x.lock().unwrap() = gx;
+                        *global_mouse_y.lock().unwrap() = gy;
+                    }
+
+                    // Check if mouse is near any edge of active_mon to transition
                     let mut target_screen: Option<String> = None;
-                    let mut side = 0; // 0=left, 1=right, 2=top, 3=bottom
+                    let mut enter_pos = (0, 0); // global position
 
-                    if pos.0 < 5 {
-                        target_screen = main_attachments.left.clone();
-                        side = 0;
-                    } else if pos.0 > server_metrics.0 - 5 {
-                        target_screen = main_attachments.right.clone();
-                        side = 1;
-                    } else if pos.1 < 5 {
-                        target_screen = main_attachments.top.clone();
-                        side = 2;
-                    } else if pos.1 > server_metrics.1 - 5 {
-                        target_screen = main_attachments.bottom.clone();
-                        side = 3;
-                    }
-
-                    if let Some(target) = target_screen {
-                        let clients = active_clients.lock().unwrap();
-                        if let Some(client) = clients.get(&target) {
-                            next_controlled = Some(target.clone());
-                            let ratio = if side == 0 || side == 1 {
-                                server_metrics.1 as f64 / (pos.1 as f64 + 0.1)
-                            } else {
-                                server_metrics.0 as f64 / (pos.0 as f64 + 0.1)
-                            };
-
-                            enter_pos = match side {
-                                1 => (8, (client.height as f64 / ratio) as i32),
-                                0 => (client.width - 8, (client.height as f64 / ratio) as i32),
-                                3 => ((client.width as f64 / ratio) as i32, 8),
-                                _ => ((client.width as f64 / ratio) as i32, client.height - 8),
-                            };
+                    // Checks: Left edge
+                    if pos.0 < active_mon.local_x + 5 {
+                        let gx_proj = db_mon.x - 8;
+                        let gy_proj = gy;
+                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
+                            target_screen = Some(target.host.clone());
+                            enter_pos = (gx_proj, gy_proj);
                         }
                     }
-                }
-
-                if let Some(ref target) = next_controlled {
-                    log::info!("Edge reached! Transferring control from main to {}", target);
-                    {
-                        let mut curr = current_controlled.lock().unwrap();
-                        *curr = target.clone();
+                    // Right edge
+                    else if pos.0 > active_mon.local_x + active_mon.width - 5 {
+                        let gx_proj = db_mon.x + db_mon.width + 8;
+                        let gy_proj = gy;
+                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
+                            target_screen = Some(target.host.clone());
+                            enter_pos = (gx_proj, gy_proj);
+                        }
                     }
-
-                    {
-                        let mut clients = active_clients.lock().unwrap();
-                        if let Some(c) = clients.get_mut(target) {
-                            c.mouse_x = enter_pos.0;
-                            c.mouse_y = enter_pos.1;
+                    // Top edge
+                    else if pos.1 < active_mon.local_y + 5 {
+                        let gx_proj = gx;
+                        let gy_proj = db_mon.y - 8;
+                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
+                            target_screen = Some(target.host.clone());
+                            enter_pos = (gx_proj, gy_proj);
+                        }
+                    }
+                    // Bottom edge
+                    else if pos.1 > active_mon.local_y + active_mon.height - 5 {
+                        let gx_proj = gx;
+                        let gy_proj = db_mon.y + db_mon.height + 8;
+                        if let Some(target) = find_client_monitor_containing(gx_proj, gy_proj) {
+                            target_screen = Some(target.host.clone());
+                            enter_pos = (gx_proj, gy_proj);
                         }
                     }
 
-                    let active_clients_cb = active_clients.clone();
-                    let current_controlled_cb = current_controlled.clone();
-                    let udp_server_cb = udp_server.clone();
-
-                    let on_move = move |dx: i32, dy: i32| {
-                        let curr = current_controlled_cb.lock().unwrap().clone();
-                        let mut next_target: Option<String> = None;
-                        let mut side = -1;
-                        let mut client_width = 0;
-                        let mut client_height = 0;
-                        let mut client_mouse_x = 0;
-                        let mut client_mouse_y = 0;
-
+                    if let Some(target_ip) = target_screen {
+                        log::info!("Transitioning control to client: {}", target_ip);
                         {
-                            let mut clients = active_clients_cb.lock().unwrap();
-                            if let Some(c) = clients.get_mut(&curr) {
-                                c.mouse_x = (c.mouse_x + dx).clamp(0, c.width);
-                                c.mouse_y = (c.mouse_y + dy).clamp(0, c.height);
+                            let mut curr = current_controlled.lock().unwrap();
+                            *curr = target_ip.clone();
+                        }
+                        {
+                            *global_mouse_x.lock().unwrap() = enter_pos.0;
+                            *global_mouse_y.lock().unwrap() = enter_pos.1;
+                        }
 
-                                if let Some(udp) = udp_server_cb.lock().unwrap().as_ref() {
+                        // Send warp to client
+                        send_warp_to_client(&target_ip, enter_pos.0, enter_pos.1, &active_clients, &udp_server);
+
+                        // Start input listeners on server
+                        let active_clients_cb = active_clients.clone();
+                        let current_controlled_cb = current_controlled.clone();
+                        let udp_server_cb = udp_server.clone();
+                        let global_mouse_x_cb = global_mouse_x.clone();
+                        let global_mouse_y_cb = global_mouse_y.clone();
+
+                        let on_move = move |dx: i32, dy: i32| {
+                            let curr = current_controlled_cb.lock().unwrap().clone();
+                            if curr == "main" {
+                                return;
+                            }
+
+                            // Load active monitors (server + active clients)
+                            let mut all_monitors = Vec::new();
+                            if let Ok(db_mons) = crate::config::get_all_monitor_layouts() {
+                                let clients = active_clients_cb.lock().unwrap();
+                                for m in db_mons {
+                                    if m.host == "main" || clients.contains_key(&m.host) {
+                                        all_monitors.push(m);
+                                    }
+                                }
+                            }
+
+                            let (gx, gy) = {
+                                let mut gmx = global_mouse_x_cb.lock().unwrap();
+                                let mut gmy = global_mouse_y_cb.lock().unwrap();
+                                *gmx += dx;
+                                *gmy += dy;
+                                (*gmx, *gmy)
+                            };
+
+                            // Find which monitor containing the new coordinates
+                            let mut current_mon = None;
+                            for m in &all_monitors {
+                                if gx >= m.x && gx < m.x + m.width
+                                    && gy >= m.y && gy < m.y + m.height {
+                                    current_mon = Some(m.clone());
+                                    break;
+                                }
+                            }
+
+                            if let Some(mon) = current_mon {
+                                if mon.host == "main" {
+                                    // Transition back to server
+                                    log::info!("Transitioning control back to server");
+                                    {
+                                        let mut clients = active_clients_cb.lock().unwrap();
+                                        if let Some(c) = clients.get_mut(&curr) {
+                                            if let Some(udp) = udp_server_cb.lock().unwrap().as_ref() {
+                                                if let Some(addr) = c.udp_addr {
+                                                    c.udp_seq += 1;
+                                                    let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, c.udp_seq);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    {
+                                        *current_controlled_cb.lock().unwrap() = "main".to_string();
+                                    }
+                                    // Warp server mouse to mon.local_x + offset
+                                    let lx = mon.local_x + (gx - mon.x);
+                                    let ly = mon.local_y + (gy - mon.y);
+                                    MouseController::new().set_position((lx, ly));
+                                } else if mon.host != curr {
+                                    // Transition between different clients
+                                    log::info!("Transitioning directly between clients: {} -> {}", curr, mon.host);
+                                    {
+                                        let mut clients = active_clients_cb.lock().unwrap();
+                                        if let Some(c) = clients.get_mut(&curr) {
+                                            if let Some(udp) = udp_server_cb.lock().unwrap().as_ref() {
+                                                if let Some(addr) = c.udp_addr {
+                                                    c.udp_seq += 1;
+                                                    let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, c.udp_seq);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    {
+                                        *current_controlled_cb.lock().unwrap() = mon.host.clone();
+                                    }
+                                    send_warp_to_client(&mon.host, gx, gy, &active_clients_cb, &udp_server_cb);
+                                } else {
+                                    // Move within the same client
+                                    send_warp_to_client(&curr, gx, gy, &active_clients_cb, &udp_server_cb);
+                                }
+                            } else {
+                                // Clamp to previous monitor
+                                let prev_mon = all_monitors
+                                    .into_iter()
+                                    .filter(|m| m.host == curr)
+                                    .min_by_key(|m| {
+                                        let dx = (m.x - gx).max(0).max(gx - (m.x + m.width - 1));
+                                        let dy = (m.y - gy).max(0).max(gy - (m.y + m.height - 1));
+                                        dx * dx + dy * dy
+                                    });
+                                if let Some(pm) = prev_mon {
+                                    let clamped_x = gx.clamp(pm.x, pm.x + pm.width - 1);
+                                    let clamped_y = gy.clamp(pm.y, pm.y + pm.height - 1);
+                                    {
+                                        *global_mouse_x_cb.lock().unwrap() = clamped_x;
+                                        *global_mouse_y_cb.lock().unwrap() = clamped_y;
+                                    }
+                                    send_warp_to_client(&curr, clamped_x, clamped_y, &active_clients_cb, &udp_server_cb);
+                                }
+                            }
+                        };
+
+                        let udp_server_click = udp_server.clone();
+                        let active_clients_click = active_clients.clone();
+                        let current_controlled_click = current_controlled.clone();
+
+                        let on_click = move |_x: i32, _y: i32, btn: String, pressed: bool| {
+                            let curr = current_controlled_click.lock().unwrap().clone();
+                            if curr == "main" {
+                                return;
+                            }
+                            let mut clients = active_clients_click.lock().unwrap();
+                            if let Some(c) = clients.get_mut(&curr) {
+                                if let Some(udp) = udp_server_click.lock().unwrap().as_ref() {
                                     if let Some(addr) = c.udp_addr {
                                         c.udp_seq += 1;
                                         let seq = c.udp_seq;
                                         let _ = udp.send_event(
-                                            &InputEvent::Move {
-                                                x: c.mouse_x,
-                                                y: c.mouse_y,
+                                            &InputEvent::MouseClick {
+                                                button: btn,
+                                                pressed,
                                             },
                                             addr,
                                             &c.cryptor,
@@ -497,154 +687,103 @@ impl AppEngine {
                                         );
                                     }
                                 }
-
-                                if c.mouse_x < 5 {
-                                    next_target = c.attachments.left.clone();
-                                    side = 0;
-                                } else if c.mouse_x > c.width - 5 {
-                                    next_target = c.attachments.right.clone();
-                                    side = 1;
-                                } else if c.mouse_y < 5 {
-                                    next_target = c.attachments.top.clone();
-                                    side = 2;
-                                } else if c.mouse_y > c.height - 5 {
-                                    next_target = c.attachments.bottom.clone();
-                                    side = 3;
-                                }
-                                client_width = c.width;
-                                client_height = c.height;
-                                client_mouse_x = c.mouse_x;
-                                client_mouse_y = c.mouse_y;
                             }
-                        }
+                        };
 
-                        if let Some(ref target) = next_target {
-                            handle_client_edge_transition(
-                                target,
-                                side,
-                                client_width,
-                                client_height,
-                                client_mouse_x,
-                                client_mouse_y,
-                                &current_controlled_cb,
-                                &active_clients_cb,
-                                &udp_server_cb,
-                            );
-                        }
-                    };
+                        let udp_server_scroll = udp_server.clone();
+                        let active_clients_scroll = active_clients.clone();
+                        let current_controlled_scroll = current_controlled.clone();
 
-                    let udp_server_click = udp_server.clone();
-                    let active_clients_click = active_clients.clone();
-                    let current_controlled_click = current_controlled.clone();
-
-                    let on_click = move |_x: i32, _y: i32, btn: String, pressed: bool| {
-                        let curr = current_controlled_click.lock().unwrap().clone();
-                        let mut clients = active_clients_click.lock().unwrap();
-                        if let Some(c) = clients.get_mut(&curr) {
-                            if let Some(udp) = udp_server_click.lock().unwrap().as_ref() {
-                                if let Some(addr) = c.udp_addr {
-                                    c.udp_seq += 1;
-                                    let seq = c.udp_seq;
-                                    let _ = udp.send_event(
-                                        &InputEvent::MouseClick {
-                                            button: btn,
-                                            pressed,
-                                        },
-                                        addr,
-                                        &c.cryptor,
-                                        seq,
-                                    );
+                        let on_scroll = move |_x: i32, _y: i32, dx: i32, dy: i32| {
+                            let curr = current_controlled_scroll.lock().unwrap().clone();
+                            if curr == "main" {
+                                return;
+                            }
+                            let mut clients = active_clients_scroll.lock().unwrap();
+                            if let Some(c) = clients.get_mut(&curr) {
+                                if let Some(udp) = udp_server_scroll.lock().unwrap().as_ref() {
+                                    if let Some(addr) = c.udp_addr {
+                                        c.udp_seq += 1;
+                                        let seq = c.udp_seq;
+                                        let _ = udp.send_event(
+                                            &InputEvent::MouseScroll { dx, dy },
+                                            addr,
+                                            &c.cryptor,
+                                            seq,
+                                        );
+                                    }
                                 }
                             }
+                        };
+
+                        let ml = MouseListener::new(on_move, on_click, on_scroll, true);
+                        ml.start();
+                        {
+                            let mut ml_lock = mouse_listener.lock().unwrap();
+                            *ml_lock = Some(ml);
                         }
-                    };
 
-                    let udp_server_scroll = udp_server.clone();
-                    let active_clients_scroll = active_clients.clone();
-                    let current_controlled_scroll = current_controlled.clone();
+                        let udp_server_press = udp_server.clone();
+                        let active_clients_press = active_clients.clone();
+                        let current_controlled_press = current_controlled.clone();
 
-                    let on_scroll = move |_x: i32, _y: i32, dx: i32, dy: i32| {
-                        let curr = current_controlled_scroll.lock().unwrap().clone();
-                        let mut clients = active_clients_scroll.lock().unwrap();
-                        if let Some(c) = clients.get_mut(&curr) {
-                            if let Some(udp) = udp_server_scroll.lock().unwrap().as_ref() {
-                                if let Some(addr) = c.udp_addr {
-                                    c.udp_seq += 1;
-                                    let seq = c.udp_seq;
-                                    let _ = udp.send_event(
-                                        &InputEvent::MouseScroll { dx, dy },
-                                        addr,
-                                        &c.cryptor,
-                                        seq,
-                                    );
+                        let on_press = move |key: String| {
+                            let curr = current_controlled_press.lock().unwrap().clone();
+                            if curr == "main" {
+                                return;
+                            }
+                            let mut clients = active_clients_press.lock().unwrap();
+                            if let Some(c) = clients.get_mut(&curr) {
+                                if let Some(udp) = udp_server_press.lock().unwrap().as_ref() {
+                                    if let Some(addr) = c.udp_addr {
+                                        c.udp_seq += 1;
+                                        let seq = c.udp_seq;
+                                        let _ = udp.send_event(
+                                            &InputEvent::KeyPress { key, pressed: true },
+                                            addr,
+                                            &c.cryptor,
+                                            seq,
+                                        );
+                                    }
                                 }
                             }
-                        }
-                    };
+                        };
 
-                    let ml = MouseListener::new(on_move, on_click, on_scroll, true);
-                    ml.start();
-                    log::debug!("Server: Initialized and started local mouse event listener.");
-                    {
-                        let mut ml_lock = mouse_listener.lock().unwrap();
-                        *ml_lock = Some(ml);
-                    }
+                        let udp_server_release = udp_server.clone();
+                        let active_clients_release = active_clients.clone();
+                        let current_controlled_release = current_controlled.clone();
 
-                    let udp_server_press = udp_server.clone();
-                    let active_clients_press = active_clients.clone();
-                    let current_controlled_press = current_controlled.clone();
-
-                    let on_press = move |key: String| {
-                        let curr = current_controlled_press.lock().unwrap().clone();
-                        let mut clients = active_clients_press.lock().unwrap();
-                        if let Some(c) = clients.get_mut(&curr) {
-                            if let Some(udp) = udp_server_press.lock().unwrap().as_ref() {
-                                if let Some(addr) = c.udp_addr {
-                                    c.udp_seq += 1;
-                                    let seq = c.udp_seq;
-                                    let _ = udp.send_event(
-                                        &InputEvent::KeyPress { key, pressed: true },
-                                        addr,
-                                        &c.cryptor,
-                                        seq,
-                                    );
+                        let on_release = move |key: String| {
+                            let curr = current_controlled_release.lock().unwrap().clone();
+                            if curr == "main" {
+                                return;
+                            }
+                            let mut clients = active_clients_release.lock().unwrap();
+                            if let Some(c) = clients.get_mut(&curr) {
+                                if let Some(udp) = udp_server_release.lock().unwrap().as_ref() {
+                                    if let Some(addr) = c.udp_addr {
+                                        c.udp_seq += 1;
+                                        let seq = c.udp_seq;
+                                        let _ = udp.send_event(
+                                            &InputEvent::KeyPress {
+                                                key,
+                                                pressed: false,
+                                            },
+                                            addr,
+                                            &c.cryptor,
+                                            seq,
+                                        );
+                                    }
                                 }
                             }
+                        };
+
+                        let kl = KeyboardListener::new(on_press, on_release, true);
+                        kl.start();
+                        {
+                            let mut kl_lock = keyboard_listener.lock().unwrap();
+                            *kl_lock = Some(kl);
                         }
-                    };
-
-                    let udp_server_release = udp_server.clone();
-                    let active_clients_release = active_clients.clone();
-                    let current_controlled_release = current_controlled.clone();
-
-                    let on_release = move |key: String| {
-                        let curr = current_controlled_release.lock().unwrap().clone();
-                        let mut clients = active_clients_release.lock().unwrap();
-                        if let Some(c) = clients.get_mut(&curr) {
-                            if let Some(udp) = udp_server_release.lock().unwrap().as_ref() {
-                                if let Some(addr) = c.udp_addr {
-                                    c.udp_seq += 1;
-                                    let seq = c.udp_seq;
-                                    let _ = udp.send_event(
-                                        &InputEvent::KeyPress {
-                                            key,
-                                            pressed: false,
-                                        },
-                                        addr,
-                                        &c.cryptor,
-                                        seq,
-                                    );
-                                }
-                            }
-                        }
-                    };
-
-                    let kl = KeyboardListener::new(on_press, on_release, true);
-                    kl.start();
-                    log::debug!("Server: Initialized and started local keyboard event listener.");
-                    {
-                        let mut kl_lock = keyboard_listener.lock().unwrap();
-                        *kl_lock = Some(kl);
                     }
                 }
             }
@@ -888,106 +1027,67 @@ impl AppEngine {
 
 
 
-pub fn handle_client_edge_transition(
-    target: &str,
-    side: i32, // 0=left, 1=right, 2=top, 3=bottom
-    client_width: i32,
-    client_height: i32,
-    client_x: i32,
-    client_y: i32,
-    current_controlled: &Arc<Mutex<String>>,
+fn find_client_monitor_containing(gx: i32, gy: i32) -> Option<crate::config::MonitorLayout> {
+    if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
+        for lay in layouts {
+            if lay.host != "main" {
+                if gx >= lay.x && gx < lay.x + lay.width
+                    && gy >= lay.y && gy < lay.y + lay.height {
+                    return Some(lay);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn send_warp_to_client(
+    client_ip: &str,
+    gx: i32,
+    gy: i32,
     active_clients: &Arc<Mutex<HashMap<String, ClientInfo>>>,
     udp_server: &Arc<Mutex<Option<UdpServer>>>,
 ) {
-    let server_metrics = get_screeninfo();
-
-    let ratio = if side == 0 || side == 1 {
-        client_height as f64 / (client_y as f64 + 0.1)
-    } else {
-        client_width as f64 / (client_x as f64 + 0.1)
-    };
-
-    if target == "main" {
-        log::info!("Edge reached on Client! Transferring control to Server");
-
-        let enter_pos = match side {
-            1 => (8, (server_metrics.1 as f64 / ratio) as i32),
-            0 => (
-                server_metrics.0 - 8,
-                (server_metrics.1 as f64 / ratio) as i32,
-            ),
-            3 => ((server_metrics.0 as f64 / ratio) as i32, 8),
-            _ => (
-                (server_metrics.0 as f64 / ratio) as i32,
-                server_metrics.1 - 8,
-            ),
-        };
-
-        let old_client = current_controlled.lock().unwrap().clone();
-        {
-            let mut clients = active_clients.lock().unwrap();
-            if let Some(c) = clients.get_mut(&old_client) {
-                if let Some(udp) = udp_server.lock().unwrap().as_ref() {
-                    if let Some(addr) = c.udp_addr {
-                        c.udp_seq += 1;
-                        let seq = c.udp_seq;
-                        let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, seq);
+    let mut clients = active_clients.lock().unwrap();
+    if let Some(c) = clients.get_mut(client_ip) {
+        let mut target_mon = None;
+        if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
+            for m in layouts {
+                if m.host == client_ip {
+                    if gx >= m.x && gx < m.x + m.width
+                        && gy >= m.y && gy < m.y + m.height {
+                        target_mon = Some(m);
+                        break;
                     }
                 }
             }
         }
 
-        {
-            let mut curr = current_controlled.lock().unwrap();
-            *curr = "main".to_string();
-        }
+        let mon = target_mon.or_else(|| {
+            if let Ok(layouts) = crate::config::get_all_monitor_layouts() {
+                layouts.into_iter().find(|m| m.host == client_ip)
+            } else {
+                None
+            }
+        });
 
-        let mouse = MouseController::new();
-        mouse.set_position(enter_pos);
-    } else {
-        let mut clients = active_clients.lock().unwrap();
-        if let Some(next_client) = clients.get(target) {
-            log::info!(
-                "Edge reached on Client! Transferring control directly to client: {}",
-                target
-            );
+        if let Some(m) = mon {
+            let scale = if c.uses_physical_pixels { m.scale_factor } else { 1.0 };
+            let cx = m.local_x + ((gx - m.x) as f64 * scale) as i32;
+            let cy = m.local_y + ((gy - m.y) as f64 * scale) as i32;
 
-            let enter_pos = match side {
-                1 => (8, (next_client.height as f64 / ratio) as i32),
-                0 => (
-                    next_client.width - 8,
-                    (next_client.height as f64 / ratio) as i32,
-                ),
-                3 => ((next_client.width as f64 / ratio) as i32, 8),
-                _ => (
-                    (next_client.width as f64 / ratio) as i32,
-                    next_client.height - 8,
-                ),
-            };
-
-            let old_client = current_controlled.lock().unwrap().clone();
-            if let Some(c) = clients.get_mut(&old_client) {
-                if let Some(udp) = udp_server.lock().unwrap().as_ref() {
-                    if let Some(addr) = c.udp_addr {
-                        c.udp_seq += 1;
-                        let seq = c.udp_seq;
-                        let _ = udp.send_event(&InputEvent::Stop, addr, &c.cryptor, seq);
-                    }
+            if let Some(udp) = udp_server.lock().unwrap().as_ref() {
+                if let Some(addr) = c.udp_addr {
+                    c.udp_seq += 1;
+                    let seq = c.udp_seq;
+                    let _ = udp.send_event(
+                        &InputEvent::Move { x: cx, y: cy },
+                        addr,
+                        &c.cryptor,
+                        seq,
+                    );
                 }
             }
-
-            if let Some(c) = clients.get_mut(target) {
-                c.mouse_x = enter_pos.0;
-                c.mouse_y = enter_pos.1;
-            }
-
-            drop(clients);
-            {
-                let mut curr = current_controlled.lock().unwrap();
-                *curr = target.to_string();
-            }
-        } else {
-            log::warn!("Edge transition target client {} not found in active clients list", target);
         }
     }
 }

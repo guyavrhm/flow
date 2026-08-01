@@ -68,6 +68,17 @@ pub fn get_screeninfo() -> (i32, i32) {
     (1920, 1080)
 }
 
+pub fn get_monitors() -> Vec<crate::network::protocol::MonitorInfo> {
+    vec![crate::network::protocol::MonitorInfo {
+        name: "Main Display".to_string(),
+        local_x: 0,
+        local_y: 0,
+        width: 1920,
+        height: 1080,
+        scale_factor: 1.0,
+    }]
+}
+
 pub fn init_keyboard_layout() {}
 
 pub struct ClipboardListener;

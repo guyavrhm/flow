@@ -96,19 +96,19 @@ impl PromisedClipboard {
 #[cfg(target_os = "macos")]
 pub use mac::{
     Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout, ClipboardListener,
+    init_keyboard_layout, ClipboardListener, get_monitors,
 };
 
 #[cfg(target_os = "windows")]
 pub use win::{
     Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout, ClipboardListener,
+    init_keyboard_layout, ClipboardListener, get_monitors,
 };
 
 #[cfg(target_os = "linux")]
 pub use linux::{
     Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout, ClipboardListener,
+    init_keyboard_layout, ClipboardListener, get_monitors,
 };
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

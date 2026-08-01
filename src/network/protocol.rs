@@ -2,9 +2,21 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MonitorInfo {
+    pub name: String,
+    pub local_x: i32,
+    pub local_y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale_factor: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScreenMetrics {
     pub width: i32,
     pub height: i32,
+    pub monitors: Vec<MonitorInfo>,
+    pub uses_physical_pixels: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

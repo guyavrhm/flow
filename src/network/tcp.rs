@@ -372,9 +372,13 @@ impl TcpClient {
 
         // Send screen metrics to server
         let screen = crate::hardware::get_screeninfo();
+        let monitors = crate::hardware::get_monitors();
+        let uses_physical_pixels = cfg!(not(target_os = "macos"));
         let metrics = ScreenMetrics {
             width: screen.0,
             height: screen.1,
+            monitors,
+            uses_physical_pixels,
         };
         let metrics_bytes = serde_json::to_vec(&metrics).unwrap();
         true_send(&mut stream_owned, &metrics_bytes)?;

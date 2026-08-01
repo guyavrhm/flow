@@ -74,6 +74,23 @@ pub fn initialize_db() -> Result<()> {
         )?;
     }
 
+    // Create monitors table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS monitors (
+            monitor_id TEXT PRIMARY KEY,
+            host TEXT NOT NULL,
+            monitor_name TEXT NOT NULL,
+            x INTEGER NOT NULL,
+            y INTEGER NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            scale_factor REAL NOT NULL,
+            local_x INTEGER NOT NULL,
+            local_y INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     // Create known_hosts table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS known_hosts (
@@ -228,5 +245,80 @@ pub fn remove_screen(name: &str) -> Result<()> {
     let db_path = get_db_path();
     let conn = Connection::open(&db_path)?;
     conn.execute("DELETE FROM screens WHERE address = ?", params![name])?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MonitorLayout {
+    pub monitor_id: String,
+    pub host: String,
+    pub monitor_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale_factor: f64,
+    pub local_x: i32,
+    pub local_y: i32,
+}
+
+pub fn save_monitor_layout(layout: &MonitorLayout) -> Result<()> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO monitors (monitor_id, host, monitor_name, x, y, width, height, scale_factor, local_x, local_y)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            layout.monitor_id,
+            layout.host,
+            layout.monitor_name,
+            layout.x,
+            layout.y,
+            layout.width,
+            layout.height,
+            layout.scale_factor,
+            layout.local_x,
+            layout.local_y
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_all_monitor_layouts() -> Result<Vec<MonitorLayout>> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path)?;
+    let mut stmt = conn.prepare("SELECT monitor_id, host, monitor_name, x, y, width, height, scale_factor, local_x, local_y FROM monitors")?;
+    let iter = stmt.query_map([], |row| {
+        Ok(MonitorLayout {
+            monitor_id: row.get(0)?,
+            host: row.get(1)?,
+            monitor_name: row.get(2)?,
+            x: row.get(3)?,
+            y: row.get(4)?,
+            width: row.get(5)?,
+            height: row.get(6)?,
+            scale_factor: row.get(7)?,
+            local_x: row.get(8)?,
+            local_y: row.get(9)?,
+        })
+    })?;
+    let mut list = Vec::new();
+    for item in iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
+pub fn remove_monitor_layout(monitor_id: &str) -> Result<()> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path)?;
+    conn.execute("DELETE FROM monitors WHERE monitor_id = ?", params![monitor_id])?;
+    Ok(())
+}
+
+pub fn remove_monitor_layouts_by_host(host: &str) -> Result<()> {
+    let db_path = get_db_path();
+    let conn = Connection::open(&db_path)?;
+    conn.execute("DELETE FROM monitors WHERE host = ?", params![host])?;
     Ok(())
 }
