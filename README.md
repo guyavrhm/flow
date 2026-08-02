@@ -41,13 +41,29 @@ Built in Rust, flow is designed to be highly efficient, secure, and modular (see
    * **Mac (Intel):** Download the `flow-macos-intel-v*.dmg` file and drag flow to your Applications folder.
    * **Linux:** Download the `flow-linux-v*.tar.gz` archive, extract it (`tar -xzf flow-linux-v*.tar.gz`), and run `./setup.sh`.
 
-#### Build from Source:
+#### Build & Run from Source (Development):
 
-Run the following commands in your terminal:
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/guyavrhm/flow && cd flow
+   ```
+
+2. **One-time Linux permission setup (if on Linux)**:
+   ```bash
+   echo 'KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/99-flow-uinput.rules
+   sudo usermod -aG input $USER
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+   *(Open a new terminal window or run `newgrp input` once after setting up)*
+
+3. **Run in development mode**:
+   ```bash
+   cargo run   # or 'make run'
+   ```
+
+*(Optional) To test building the distributable `.tar.gz` package locally:*
 ```bash
-git clone https://github.com/guyavrhm/flow && cd flow
-make build
-make run
+make package-linux   # Generates flow-linux-x86_64.tar.gz
 ```
 
 
@@ -74,7 +90,7 @@ Simply move your mouse from one screen to the other, exactly like when having a 
 | :--- | :--- |
 | **Windows** | 10, 11 |
 | **macOS** | Apple Silicon, Intel |
-| **Linux** | X11 |
+| **Linux** | X11 & Wayland (evdev/uinput) |
 
 ## Contact
 If you want to contact me you can reach me at my [email](mailto:guy.ava03@gmail.com).

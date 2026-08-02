@@ -47,7 +47,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxtst-dev libxmu-dev libasound2-dev
+          sudo apt-get install -y libx11-dev libxtst-dev libxmu-dev libasound2-dev libgtk-3-dev
 
       - name: Build Release Binary
         run: cargo build --release --locked
@@ -69,12 +69,8 @@ jobs:
         run: |
           TAG_NAME="${{ github.ref_name }}"
           if [ -z "$TAG_NAME" ]; then TAG_NAME="dev"; fi
-          # Prepare temporary bundle directory
-          mkdir -p dmg_root/flow
-          cp target/release/flow dmg_root/flow/flow
-          cp -r resources dmg_root/flow/resources
-          # Build native macOS DMG using hdiutil
-          hdiutil create -volname "flow" -srcfolder dmg_root/flow -ov -format UDZO "${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}"
+          make package-mac
+          mv flow-macos.dmg "${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}"
 
       - name: Build Linux tar.gz Bundle (Linux only)
         if: matrix.os == 'ubuntu-latest'
@@ -82,12 +78,8 @@ jobs:
         run: |
           TAG_NAME="${{ github.ref_name }}"
           if [ -z "$TAG_NAME" ]; then TAG_NAME="dev"; fi
-          mkdir -p dist
-          cp target/release/flow dist/flow
-          cp -r resources dist/resources
-          cp installer/setup_linux.sh dist/setup.sh
-          cp installer/flow.desktop dist/
-          tar -czf "${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}" -C dist flow resources setup.sh flow.desktop
+          make package-linux
+          mv flow-linux-x86_64.tar.gz "${{ matrix.artifact-prefix }}-${TAG_NAME}.${{ matrix.extension }}"
 
       - name: Determine upload asset
         id: asset
