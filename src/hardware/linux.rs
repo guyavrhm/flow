@@ -64,7 +64,7 @@ fn init_virtual_mouse() -> Option<VirtualDevice> {
                 Some(dev)
             }
             Err(e) => {
-                log::warn!("Failed to build /dev/uinput virtual mouse: {:?}. Ensure user is in 'input' group and udev rules are configured.", e);
+                log::warn!("Failed to build /dev/uinput virtual mouse: {:?}. To grant permissions run: sudo usermod -aG input $USER && echo 'KERNEL==\"uinput\", MODE=\"0660\", GROUP=\"input\", OPTIONS+=\"static_node=uinput\"' | sudo tee /etc/udev/rules.d/99-input.rules", e);
                 None
             }
         },
@@ -92,7 +92,7 @@ fn init_virtual_keyboard() -> Option<VirtualDevice> {
                 Some(dev)
             }
             Err(e) => {
-                log::warn!("Failed to build /dev/uinput virtual keyboard: {:?}. Ensure user is in 'input' group and udev rules are configured.", e);
+                log::warn!("Failed to build /dev/uinput virtual keyboard: {:?}. To grant permissions run: sudo usermod -aG input $USER", e);
                 None
             }
         },
@@ -116,17 +116,28 @@ impl MouseController {
     }
 
     pub fn position(&self) -> (i32, i32) {
-        if gtk::is_initialized() {
-            if let Some(display) = gdk::Display::default() {
+        if !gtk::is_initialized() {
+            return (0, 0);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        glib::MainContext::default().invoke(move || {
+            let pos = if let Some(display) = gdk::Display::default() {
                 if let Some(seat) = display.default_seat() {
                     if let Some(pointer) = seat.pointer() {
                         let (_, x, y) = pointer.position();
-                        return (x, y);
+                        (x, y)
+                    } else {
+                        (0, 0)
                     }
+                } else {
+                    (0, 0)
                 }
-            }
-        }
-        (0, 0)
+            } else {
+                (0, 0)
+            };
+            let _ = tx.send(pos);
+        });
+        rx.recv_timeout(Duration::from_millis(100)).unwrap_or((0, 0))
     }
 
     pub fn set_position(&self, pos: (i32, i32)) {
@@ -690,11 +701,10 @@ impl ClipboardController {
             return String::new();
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        glib::idle_add_local(move || {
+        glib::MainContext::default().invoke(move || {
             let clipboard = gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD);
             let text = clipboard.wait_for_text().map(|s| s.to_string()).unwrap_or_default();
             let _ = tx.send(text);
-            glib::ControlFlow::Break
         });
         rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default()
     }
@@ -708,11 +718,10 @@ impl ClipboardController {
         push_ignore_hash(hash);
 
         IN_SET_CLIPBOARD.store(true, Ordering::SeqCst);
-        glib::idle_add_local(move || {
+        glib::MainContext::default().invoke(move || {
             let clipboard = gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD);
             clipboard.set_text(&text_owned);
             IN_SET_CLIPBOARD.store(false, Ordering::SeqCst);
-            glib::ControlFlow::Break
         });
     }
 
@@ -728,11 +737,10 @@ impl ClipboardController {
         push_ignore_hash(hash);
 
         IN_SET_CLIPBOARD.store(true, Ordering::SeqCst);
-        glib::idle_add_local(move || {
+        glib::MainContext::default().invoke(move || {
             let clipboard = gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD);
             clipboard.set_text(&uris.join("\n"));
             IN_SET_CLIPBOARD.store(false, Ordering::SeqCst);
-            glib::ControlFlow::Break
         });
     }
 }
@@ -771,7 +779,7 @@ pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize) {
         });
     }
 
-    glib::idle_add_local(move || {
+    glib::MainContext::default().invoke(move || {
         let clipboard = gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD);
         let targets = vec![
             gtk::TargetEntry::new("text/plain", gtk::TargetFlags::OTHER_APP, 0),
@@ -800,8 +808,6 @@ pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize) {
                 }
             }
         });
-
-        glib::ControlFlow::Break
     });
 }
 
@@ -828,7 +834,7 @@ impl ClipboardListener {
         let running = Arc::new(Mutex::new(false));
         if gtk::is_initialized() {
             let on_change_arc = Arc::new(on_change);
-            glib::idle_add_local(move || {
+            glib::MainContext::default().invoke(move || {
                 let clipboard = gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD);
                 let on_change_cb = on_change_arc.clone();
                 clipboard.connect("owner-change", false, move |_| {
@@ -845,7 +851,6 @@ impl ClipboardListener {
                     on_change_cb();
                     None
                 });
-                glib::ControlFlow::Break
             });
         }
 
@@ -866,20 +871,40 @@ impl ClipboardListener {
 // ---------------------------------------------------------------------------
 
 pub fn get_screeninfo() -> (i32, i32) {
-    if gtk::is_initialized() {
-        if let Some(display) = gdk::Display::default() {
+    if !gtk::is_initialized() {
+        return (1920, 1080);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    glib::MainContext::default().invoke(move || {
+        let res = if let Some(display) = gdk::Display::default() {
             if let Some(mon) = display.primary_monitor().or_else(|| display.monitor(0)) {
                 let rect = mon.geometry();
-                return (rect.width(), rect.height());
+                (rect.width(), rect.height())
+            } else {
+                (1920, 1080)
             }
-        }
-    }
-    (1920, 1080)
+        } else {
+            (1920, 1080)
+        };
+        let _ = tx.send(res);
+    });
+    rx.recv_timeout(Duration::from_millis(200)).unwrap_or((1920, 1080))
 }
 
 pub fn get_monitors() -> Vec<MonitorInfo> {
-    let mut monitors = Vec::new();
-    if gtk::is_initialized() {
+    if !gtk::is_initialized() {
+        return vec![MonitorInfo {
+            name: "Main Display".to_string(),
+            local_x: 0,
+            local_y: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+        }];
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    glib::MainContext::default().invoke(move || {
+        let mut monitors = Vec::new();
         if let Some(display) = gdk::Display::default() {
             let n_monitors = display.n_monitors();
             for i in 0..n_monitors {
@@ -898,20 +923,21 @@ pub fn get_monitors() -> Vec<MonitorInfo> {
                 }
             }
         }
-    }
-
+        let _ = tx.send(monitors);
+    });
+    let monitors = rx.recv_timeout(Duration::from_millis(200)).unwrap_or_default();
     if monitors.is_empty() {
-        monitors.push(MonitorInfo {
+        vec![MonitorInfo {
             name: "Main Display".to_string(),
             local_x: 0,
             local_y: 0,
             width: 1920,
             height: 1080,
             scale_factor: 1.0,
-        });
+        }]
+    } else {
+        monitors
     }
-
-    monitors
 }
 
 pub fn init_keyboard_layout() {
