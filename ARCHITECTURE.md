@@ -228,12 +228,12 @@ Low-level OS FFI imports, Carbon/Quartz wrappers, and synchronous platform-speci
 * **`pub fn init_keyboard_layout()`**
   * Invoked on the main thread during app startup to cache keyboard layouts if required by the target OS.
 
-#### 2. Clipboard Struct
+#### 2. ClipboardController Struct
 Manages reading from and writing to the OS clipboard.
 ```rust
-pub struct Clipboard;
+pub struct ClipboardController;
 
-impl Clipboard {
+impl ClipboardController {
     // Queries current clipboard contents and returns it as a string
     pub fn data() -> String;
 
@@ -364,7 +364,7 @@ To support a new operating system or windowing system, implement a new backend d
 
 1. Create the source file under the hardware directory: `src/hardware/<your_os>.rs`.
 2. Implement the HAL traits (`MouseSimulator`, `KeyboardSimulator`, `InputHookListener`, and `ClipboardManager`) inside your new file.
-3. Expose the concrete driver implementations (`Clipboard`, `KeyboardController`, `KeyboardListener`, `MouseController`, `MouseListener`, `ClipboardListener`, and screen metrics helpers) that implement these traits.
+3. Expose the concrete driver implementations (`ClipboardController`, `KeyboardController`, `KeyboardListener`, `MouseController`, `MouseListener`, `ClipboardListener`, and screen metrics helpers) that implement these traits.
 4. Implement `pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize)` within your new file to handle registering the platform-specific lazy promise owner.
 5. Expose the new module in `src/hardware/mod.rs` using conditional compilation attributes:
 
@@ -374,6 +374,6 @@ pub mod <your_os>;
 
 #[cfg(target_os = "<your_os>")]
 pub use <your_os>::{
-    Clipboard, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
+    ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
     init_keyboard_layout, ClipboardListener,
 };
