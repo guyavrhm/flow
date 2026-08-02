@@ -4,7 +4,7 @@ pub mod clipboard;
 
 use crate::config::{SettingsData, get_settings};
 use crate::hardware::{
-    ClipboardController, KeyboardListener, MouseController, MouseListener,
+    ClipboardController, KeyboardListener, MouseListener,
 };
 use clipboard::{hash_clipboard_data, stream_offered_data, handle_incoming_clipboard_chunk};
 
@@ -21,7 +21,7 @@ pub struct ClipboardAccumulator {
     pub buffer: Vec<u8>,
 }
 
-use crate::network::protocol::{ClipboardPayload, InputEvent, ScreenMetrics};
+use crate::network::protocol::{ClipboardPayload, ScreenMetrics};
 use crate::network::tcp::{TcpClient, TcpServer};
 use crate::network::udp::{UdpClient, UdpServer};
 use crate::network::tls::PendingTrustRequest;
@@ -600,7 +600,6 @@ impl AppEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::clipboard::hash_clipboard_data;
 
     #[test]

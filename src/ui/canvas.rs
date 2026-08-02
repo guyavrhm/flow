@@ -101,11 +101,11 @@ impl ScreenLayoutCanvas {
         let origin_pt = rect.min + egui::vec2(offset_x, offset_y);
         painter.line_segment(
             [origin_pt - egui::vec2(15.0, 0.0), origin_pt + egui::vec2(15.0, 0.0)],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(100)),
         );
         painter.line_segment(
             [origin_pt - egui::vec2(0.0, 15.0), origin_pt + egui::vec2(0.0, 15.0)],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(100)),
         );
 
         let mut dragged_screen = None;
@@ -147,7 +147,7 @@ impl ScreenLayoutCanvas {
                 ui.visuals().widgets.active.bg_stroke.color
             };
 
-            let stroke_width = if is_selected { 3.0 } else { 1.5 };
+            let stroke_width = if is_selected { 3.0_f32 } else { 1.5_f32 };
 
             painter.rect(
                 screen_rect,
@@ -176,7 +176,7 @@ impl ScreenLayoutCanvas {
             }
         }
 
-        if response.drag_released() {
+        if response.drag_stopped() {
             if let Some(id) = self.selected_screen.clone() {
                 if let Some(screen) = self.screens.get(&id) {
                     if screen.host != "main" {

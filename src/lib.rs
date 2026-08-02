@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 pub mod config;
 pub mod crypto;
 pub mod engine;
