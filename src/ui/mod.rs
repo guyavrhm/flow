@@ -23,7 +23,6 @@ pub struct FlowApp {
     show_trash_list: bool,
     status_msg: String,
     local_fingerprint: String,
-    initial_hide_done: bool,
     was_hidden_for_transfer: bool,
 }
 
@@ -65,11 +64,10 @@ impl FlowApp {
             canvas,
             engine,
             tray,
-            show_window: false,
+            show_window: true,
             show_trash_list: false,
             status_msg: "".to_string(),
             local_fingerprint,
-            initial_hide_done: false,
             was_hidden_for_transfer: false,
         }
     }
@@ -112,10 +110,6 @@ impl FlowApp {
 
 impl eframe::App for FlowApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if !self.initial_hide_done {
-            self.initial_hide_done = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        }
 
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
