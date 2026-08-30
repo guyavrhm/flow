@@ -24,6 +24,8 @@ pub struct FlowApp {
     status_msg: String,
     local_fingerprint: String,
     was_hidden_for_transfer: bool,
+    last_topology_version: u64,
+    last_connected_peers: Vec<String>,
 }
 
 impl FlowApp {
@@ -37,6 +39,8 @@ impl FlowApp {
         style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(45, 120, 200);
         style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(55, 140, 230);
         cc.egui_ctx.set_style(style);
+
+        crate::state::STATE_MANAGER.set_egui_ctx(cc.egui_ctx.clone());
 
         let initial_settings = get_settings().unwrap_or(SettingsData {
             ip: "".to_string(),
@@ -69,6 +73,8 @@ impl FlowApp {
             status_msg: "".to_string(),
             local_fingerprint,
             was_hidden_for_transfer: false,
+            last_topology_version: 0,
+            last_connected_peers: Vec::new(),
         }
     }
 
@@ -98,6 +104,7 @@ impl FlowApp {
             }
         }
 
+        crate::state::STATE_MANAGER.notify_topology_changed();
         self.status_msg = "Settings saved successfully!".to_string();
         log::info!("UI: Settings and screen layout saved successfully. Triggering engine reload.");
 
@@ -174,6 +181,15 @@ impl eframe::App for FlowApp {
             self.show_window = false;
             self.was_hidden_for_transfer = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        // Auto-unhide and focus if there is a pending trust approval request
+        let pending_trusts = crate::state::STATE_MANAGER.get_pending_trusts();
+        if !pending_trusts.is_empty() && !self.show_window {
+            log::info!("[UI] Pending trust approval detected while minimized. Unhiding window.");
+            self.show_window = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
         if !self.show_window {
@@ -279,12 +295,12 @@ impl eframe::App for FlowApp {
                     ui.add_space(5.0);
 
                     ui.horizontal(|ui| {
-                        let active_ips = {
-                            let clients = self.engine.active_clients.lock().unwrap();
-                            clients.keys().cloned().collect::<Vec<String>>()
-                        };
-                        for screen in self.canvas.screens.values_mut() {
-                            screen.is_connected = screen.host == "main" || active_ips.contains(&screen.host);
+                        let fully_connected_ips = crate::state::STATE_MANAGER.get_fully_connected_peers();
+                        let current_version = crate::state::STATE_MANAGER.topology_version();
+                        if current_version != self.last_topology_version || fully_connected_ips != self.last_connected_peers {
+                            self.canvas.sync_with_db(&fully_connected_ips);
+                            self.last_topology_version = current_version;
+                            self.last_connected_peers = fully_connected_ips;
                         }
 
                         let _ = self.canvas.draw(ui);
@@ -320,6 +336,7 @@ impl eframe::App for FlowApp {
                                             }
                                             self.canvas.screens.retain(|_, s| s.host != r_host);
                                             self.canvas.selected_screen = None;
+                                            crate::state::STATE_MANAGER.notify_topology_changed();
                                         }
                                     });
                             });
@@ -331,39 +348,52 @@ impl eframe::App for FlowApp {
 
         // Show TOFU fingerprint verification modal if any connection is pending trust approval
         let pending_request = {
-            let trusts = self.engine.pending_trusts.lock().unwrap();
-            trusts.first().map(|req| (req.ip.clone(), req.fingerprint.clone()))
+            let trusts = crate::state::STATE_MANAGER.get_pending_trusts();
+            trusts.first().cloned()
         };
 
-        if let Some((ip, fingerprint)) = pending_request {
-            egui::Window::new("Security Alert - Untrusted Connection")
+        if let Some(req) = pending_request {
+            let title = if req.is_mismatch {
+                "⚠️ Security Alert - Fingerprint Mismatch!"
+            } else {
+                "Security Alert - Untrusted Connection"
+            };
+
+            egui::Window::new(title)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.colored_label(egui::Color32::from_rgb(255, 215, 0), "⚠️ A new computer is requesting a connection.");
+                    if req.is_mismatch {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 80, 80),
+                            "⚠️ CRITICAL SECURITY WARNING: Certificate fingerprint changed for this known host!",
+                        );
+                        ui.label("This may happen if the other computer re-installed the app, or someone is intercepting the connection.");
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(255, 215, 0), "⚠️ A new computer is requesting a connection.");
+                    }
+
                     ui.add_space(5.0);
-                    ui.label(format!("IP Address: {}", ip));
+                    ui.label(format!("IP Address: {}", req.ip));
                     ui.add_space(5.0);
                     ui.label("SHA-256 Certificate Fingerprint:");
-                    ui.code(&fingerprint);
+                    ui.code(&req.fingerprint);
                     ui.add_space(10.0);
                     ui.label("Please compare this fingerprint with the code shown on the other computer's screen. If they match, it is safe to connect.");
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.button("Trust and Connect").clicked() {
+                            log::info!("[UI] User clicked 'Trust and Connect' for [{}]", req.ip);
+                            crate::state::STATE_MANAGER.approve_trust(&req.ip);
                             let mut list = self.engine.pending_trusts.lock().unwrap();
-                            if !list.is_empty() {
-                                let req = list.remove(0);
-                                let _ = req.tx.send(true);
-                            }
+                            list.retain(|r| r.ip != req.ip);
                         }
                         if ui.button("Reject Connection").clicked() {
+                            log::warn!("[UI] User clicked 'Reject Connection' for [{}]", req.ip);
+                            crate::state::STATE_MANAGER.reject_trust(&req.ip);
                             let mut list = self.engine.pending_trusts.lock().unwrap();
-                            if !list.is_empty() {
-                                let req = list.remove(0);
-                                let _ = req.tx.send(false);
-                            }
+                            list.retain(|r| r.ip != req.ip);
                         }
                     });
                 });

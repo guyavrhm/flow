@@ -50,26 +50,69 @@ impl ScreenLayoutCanvas {
 
     pub fn load_from_db(&mut self, active_clients: &Vec<String>) {
         self.screens.clear();
+        self.sync_with_db(active_clients);
+    }
+
+    pub fn sync_with_db(&mut self, active_clients: &[String]) {
         if let Ok(layouts) = get_all_monitor_layouts() {
+            let mut db_ids = std::collections::HashSet::new();
+
             for lay in layouts {
+                // Filter out loopback 127.0.0.1 monitors to avoid self-host duplicates
+                if lay.host == "127.0.0.1" {
+                    continue;
+                }
+
+                db_ids.insert(lay.monitor_id.clone());
                 let is_connected = lay.host == "main" || active_clients.contains(&lay.host);
-                self.screens.insert(
-                    lay.monitor_id.clone(),
-                    EditorMonitor {
-                        monitor_id: lay.monitor_id,
-                        host: lay.host,
-                        monitor_name: lay.monitor_name,
-                        x: lay.x as f32,
-                        y: lay.y as f32,
-                        w: lay.width as f32,
-                        h: lay.height as f32,
-                        scale_factor: lay.scale_factor,
-                        local_x: lay.local_x,
-                        local_y: lay.local_y,
-                        is_connected,
-                    },
-                );
+
+                if let Some(existing) = self.screens.get_mut(&lay.monitor_id) {
+                    if existing.is_connected != is_connected {
+                        log::info!(
+                            "[UI] Canvas: Screen [{}] ({}) state changed: {} -> {}",
+                            lay.host,
+                            lay.monitor_name,
+                            if existing.is_connected { "CONNECTED (Green)" } else { "OFFLINE (Grey)" },
+                            if is_connected { "CONNECTED (Green)" } else { "OFFLINE (Grey)" }
+                        );
+                    }
+                    existing.is_connected = is_connected;
+                    // Update geometry and dimensions
+                    existing.w = lay.width as f32;
+                    existing.h = lay.height as f32;
+                    existing.scale_factor = lay.scale_factor;
+                    existing.local_x = lay.local_x;
+                    existing.local_y = lay.local_y;
+                } else {
+                    log::info!(
+                        "[UI] Canvas: Added new screen [{}] ({}) ({}x{}) - Status: {}",
+                        lay.host,
+                        lay.monitor_name,
+                        lay.width,
+                        lay.height,
+                        if is_connected { "CONNECTED (Green)" } else { "OFFLINE (Grey)" }
+                    );
+                    self.screens.insert(
+                        lay.monitor_id.clone(),
+                        EditorMonitor {
+                            monitor_id: lay.monitor_id,
+                            host: lay.host,
+                            monitor_name: lay.monitor_name,
+                            x: lay.x as f32,
+                            y: lay.y as f32,
+                            w: lay.width as f32,
+                            h: lay.height as f32,
+                            scale_factor: lay.scale_factor,
+                            local_x: lay.local_x,
+                            local_y: lay.local_y,
+                            is_connected,
+                        },
+                    );
+                }
             }
+
+            // Prune deleted screens
+            self.screens.retain(|id, _| db_ids.contains(id));
         }
     }
 

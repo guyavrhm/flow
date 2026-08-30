@@ -1,9 +1,12 @@
 use std::io::BufReader;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use rustls::client::danger::{ServerCertVerifier, ServerCertVerified, HandshakeSignatureValid};
 use rustls::server::danger::{ClientCertVerifier, ClientCertVerified};
 use rustls::{Error, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName, PrivateKeyDer, UnixTime};
+
+use crate::state::{STATE_MANAGER, PeerState, PendingTrust};
 
 #[derive(Debug)]
 pub struct PendingTrustRequest {
@@ -52,19 +55,27 @@ impl ServerCertVerifier for TofuServerVerifier {
     ) -> Result<ServerCertVerified, Error> {
         let cert_der = end_entity.as_ref();
         let fingerprint = crate::crypto::compute_fingerprint(cert_der);
+        log::info!("[TLS] Verifying Server certificate for [{}] (Fingerprint: {})", self.server_ip, fingerprint);
         
+        let mut is_mismatch = false;
+
         // 1. Check if trusted in database
         match crate::config::get_trusted_fingerprint(&self.server_ip) {
             Ok(Some(trusted_fp)) => {
                 if trusted_fp == fingerprint {
+                    log::info!("[TLS] Server [{}] fingerprint MATCHES trusted database entry. Trust verified!", self.server_ip);
+                    STATE_MANAGER.set_peer_state(&self.server_ip, PeerState::TlsEstablished);
                     return Ok(ServerCertVerified::assertion());
                 } else {
-                    log::warn!("Fingerprint mismatch for server {}: expected {}, got {}", self.server_ip, trusted_fp, fingerprint);
+                    is_mismatch = true;
+                    log::warn!("[TLS] SECURITY WARNING: Fingerprint mismatch for server [{}]! Expected: {}, Got: {}", self.server_ip, trusted_fp, fingerprint);
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                log::info!("[TLS] Server [{}] is not yet in known_hosts database. Prompting user for Trust-On-First-Use.", self.server_ip);
+            }
             Err(e) => {
-                log::error!("Database error checking fingerprint: {:?}", e);
+                log::error!("[TLS] Database error checking server fingerprint: {:?}", e);
             }
         }
 
@@ -75,20 +86,42 @@ impl ServerCertVerifier for TofuServerVerifier {
             list.push(PendingTrustRequest {
                 ip: self.server_ip.clone(),
                 fingerprint: fingerprint.clone(),
-                tx,
+                tx: tx.clone(),
             });
         }
 
-        // Block connection thread until user accepts or rejects
-        match rx.recv() {
+        // Register with StateManager to wake up UI immediately
+        STATE_MANAGER.set_peer_state(
+            &self.server_ip,
+            PeerState::PendingTrustApproval(PendingTrust {
+                ip: self.server_ip.clone(),
+                fingerprint: fingerprint.clone(),
+                is_mismatch,
+                tx: Arc::new(Mutex::new(Some(tx))),
+            }),
+        );
+        STATE_MANAGER.request_repaint();
+
+        // Block connection thread until user accepts, rejects, or times out after 60 seconds
+        match rx.recv_timeout(Duration::from_secs(60)) {
             Ok(true) => {
-                // Trust and save to DB
+                log::info!("[TLS] User ACCEPTED trust for server [{}]. Saving to database.", self.server_ip);
                 if let Err(e) = crate::config::trust_fingerprint(&self.server_ip, &fingerprint) {
-                    log::error!("Failed to save trusted fingerprint: {:?}", e);
+                    log::error!("[TLS] Failed to save trusted fingerprint to DB: {:?}", e);
                 }
+                STATE_MANAGER.set_peer_state(&self.server_ip, PeerState::TlsEstablished);
                 Ok(ServerCertVerified::assertion())
             }
-            _ => Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)),
+            Ok(false) => {
+                log::warn!("[TLS] User REJECTED connection from server [{}]", self.server_ip);
+                STATE_MANAGER.set_peer_state(&self.server_ip, PeerState::Disconnected);
+                Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+            }
+            Err(_) => {
+                log::warn!("[TLS] Trust verification for server [{}] timed out after 60s", self.server_ip);
+                STATE_MANAGER.set_peer_state(&self.server_ip, PeerState::Disconnected);
+                Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+            }
         }
     }
 
@@ -147,19 +180,27 @@ impl ClientCertVerifier for TofuClientVerifier {
     ) -> Result<ClientCertVerified, Error> {
         let cert_der = end_entity.as_ref();
         let fingerprint = crate::crypto::compute_fingerprint(cert_der);
+        log::info!("[TLS] Verifying Client certificate for [{}] (Fingerprint: {})", self.client_ip, fingerprint);
         
+        let mut is_mismatch = false;
+
         // 1. Check if trusted in database
         match crate::config::get_trusted_fingerprint(&self.client_ip) {
             Ok(Some(trusted_fp)) => {
                 if trusted_fp == fingerprint {
+                    log::info!("[TLS] Client [{}] fingerprint MATCHES trusted database entry. Trust verified!", self.client_ip);
+                    STATE_MANAGER.set_peer_state(&self.client_ip, PeerState::TlsEstablished);
                     return Ok(ClientCertVerified::assertion());
                 } else {
-                    log::warn!("Fingerprint mismatch for client {}: expected {}, got {}", self.client_ip, trusted_fp, fingerprint);
+                    is_mismatch = true;
+                    log::warn!("[TLS] SECURITY WARNING: Fingerprint mismatch for client [{}]! Expected: {}, Got: {}", self.client_ip, trusted_fp, fingerprint);
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                log::info!("[TLS] Client [{}] is not yet in known_hosts database. Prompting user for Trust-On-First-Use.", self.client_ip);
+            }
             Err(e) => {
-                log::error!("Database error checking client fingerprint: {:?}", e);
+                log::error!("[TLS] Database error checking client fingerprint: {:?}", e);
             }
         }
 
@@ -170,20 +211,42 @@ impl ClientCertVerifier for TofuClientVerifier {
             list.push(PendingTrustRequest {
                 ip: self.client_ip.clone(),
                 fingerprint: fingerprint.clone(),
-                tx,
+                tx: tx.clone(),
             });
         }
 
-        // Block connection thread until user accepts or rejects
-        match rx.recv() {
+        // Register with StateManager to wake up UI immediately
+        STATE_MANAGER.set_peer_state(
+            &self.client_ip,
+            PeerState::PendingTrustApproval(PendingTrust {
+                ip: self.client_ip.clone(),
+                fingerprint: fingerprint.clone(),
+                is_mismatch,
+                tx: Arc::new(Mutex::new(Some(tx))),
+            }),
+        );
+        STATE_MANAGER.request_repaint();
+
+        // Block connection thread until user accepts, rejects, or times out after 60 seconds
+        match rx.recv_timeout(Duration::from_secs(60)) {
             Ok(true) => {
-                // Trust and save to DB
+                log::info!("[TLS] User ACCEPTED trust for client [{}]. Saving to database.", self.client_ip);
                 if let Err(e) = crate::config::trust_fingerprint(&self.client_ip, &fingerprint) {
-                    log::error!("Failed to save trusted client fingerprint: {:?}", e);
+                    log::error!("[TLS] Failed to save trusted client fingerprint to DB: {:?}", e);
                 }
+                STATE_MANAGER.set_peer_state(&self.client_ip, PeerState::TlsEstablished);
                 Ok(ClientCertVerified::assertion())
             }
-            _ => Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)),
+            Ok(false) => {
+                log::warn!("[TLS] User REJECTED connection from client [{}]", self.client_ip);
+                STATE_MANAGER.set_peer_state(&self.client_ip, PeerState::Disconnected);
+                Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+            }
+            Err(_) => {
+                log::warn!("[TLS] Trust verification for client [{}] timed out after 60s", self.client_ip);
+                STATE_MANAGER.set_peer_state(&self.client_ip, PeerState::Disconnected);
+                Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+            }
         }
     }
 

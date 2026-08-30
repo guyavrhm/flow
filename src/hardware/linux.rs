@@ -289,6 +289,14 @@ impl KeyboardController {
             }
         }
     }
+
+    pub fn release_all(&self) {
+        for modifier in &[
+            "Shift", "Shift_R", "Control", "Control_R", "Alt", "Alt_R", "Meta", "Meta_R",
+        ] {
+            self.release(modifier);
+        }
+    }
 }
 
 impl crate::hardware::KeyboardSimulator for KeyboardController {
@@ -297,6 +305,9 @@ impl crate::hardware::KeyboardSimulator for KeyboardController {
     }
     fn release(&self, key: &str) {
         Self::release(self, key);
+    }
+    fn release_all(&self) {
+        Self::release_all(self);
     }
 }
 
@@ -507,12 +518,7 @@ impl MouseListener {
                 }
             }
 
-            if suppress {
-                for dev in &mut devices {
-                    let _ = dev.grab();
-                }
-            }
-
+            let mut is_currently_grabbed = false;
             *running_clone.lock().unwrap() = true;
             log::info!("Started evdev MouseListener monitoring {} devices", devices.len());
 
@@ -520,6 +526,26 @@ impl MouseListener {
             let mut mouse_y = 0i32;
 
             while *running_clone.lock().unwrap() {
+                let should_redirect = crate::state::IS_REDIRECTING.load(std::sync::atomic::Ordering::Relaxed);
+                if suppress {
+                    if should_redirect && !is_currently_grabbed {
+                        for dev in &mut devices {
+                            let _ = dev.grab();
+                        }
+                        is_currently_grabbed = true;
+                    } else if !should_redirect && is_currently_grabbed {
+                        for dev in &mut devices {
+                            let _ = dev.ungrab();
+                        }
+                        is_currently_grabbed = false;
+                    }
+                }
+
+                if !should_redirect {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
                 let mut activity = false;
                 for dev in &mut devices {
                     if let Ok(events) = dev.fetch_events() {
@@ -557,7 +583,7 @@ impl MouseListener {
                 }
             }
 
-            if suppress {
+            if is_currently_grabbed {
                 for dev in &mut devices {
                     let _ = dev.ungrab();
                 }
@@ -620,23 +646,56 @@ impl KeyboardListener {
                 }
             }
 
-            if suppress {
-                for dev in &mut devices {
-                    let _ = dev.grab();
-                }
-            }
-
+            let mut is_currently_grabbed = false;
             *running_clone.lock().unwrap() = true;
             log::info!("Started evdev KeyboardListener monitoring {} devices", devices.len());
 
+            let mut ctrl_down = false;
+            let mut alt_down = false;
+
             while *running_clone.lock().unwrap() {
+                let should_redirect = crate::state::IS_REDIRECTING.load(std::sync::atomic::Ordering::Relaxed);
+                if suppress {
+                    if should_redirect && !is_currently_grabbed {
+                        for dev in &mut devices {
+                            let _ = dev.grab();
+                        }
+                        is_currently_grabbed = true;
+                    } else if !should_redirect && is_currently_grabbed {
+                        for dev in &mut devices {
+                            let _ = dev.ungrab();
+                        }
+                        is_currently_grabbed = false;
+                    }
+                }
+
+                if !should_redirect {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
                 let mut activity = false;
                 for dev in &mut devices {
                     if let Ok(events) = dev.fetch_events() {
                         for ev in events {
                             activity = true;
                             if ev.event_type() == EventType::KEY {
-                                let key_name = evdev_key_to_name(Key::new(ev.code()));
+                                let key_code = ev.code();
+                                let is_down = ev.value() != 0;
+                                if key_code == Key::KEY_LEFTCTRL.code() || key_code == Key::KEY_RIGHTCTRL.code() {
+                                    ctrl_down = is_down;
+                                } else if key_code == Key::KEY_LEFTALT.code() || key_code == Key::KEY_RIGHTALT.code() {
+                                    alt_down = is_down;
+                                }
+
+                                // Emergency escape: Ctrl + Alt + Escape
+                                if key_code == Key::KEY_ESC.code() && is_down && ctrl_down && alt_down {
+                                    log::warn!("[EMERGENCY] Ctrl+Alt+Escape detected on Linux! Triggering emergency release to host.");
+                                    crate::state::STATE_MANAGER.emergency_release();
+                                    continue;
+                                }
+
+                                let key_name = evdev_key_to_name(Key::new(key_code));
                                 match ev.value() {
                                     1 | 2 => on_press(key_name),
                                     0 => on_release(key_name),
@@ -651,7 +710,7 @@ impl KeyboardListener {
                 }
             }
 
-            if suppress {
+            if is_currently_grabbed {
                 for dev in &mut devices {
                     let _ = dev.ungrab();
                 }
@@ -943,3 +1002,10 @@ pub fn get_monitors() -> Vec<MonitorInfo> {
 pub fn init_keyboard_layout() {
     log::info!("Linux keyboard layout initialized");
 }
+
+pub fn show_cursor() {}
+pub fn hide_cursor() {}
+pub fn uses_physical_pixels() -> bool {
+    true
+}
+

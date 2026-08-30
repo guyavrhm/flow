@@ -199,7 +199,15 @@ impl MouseController {
             pressed_buttons: Mutex::new(pressed),
         }
     }
+}
 
+impl Default for MouseController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MouseController {
     pub fn position(&self) -> (i32, i32) {
         unsafe {
             let event = CGEventCreate(ptr::null_mut());
@@ -376,6 +384,7 @@ pub struct MouseListenerCallbacks {
     pub x_center: i32,
     pub y_center: i32,
     pub has_move: bool,
+    pub override_redirect: Option<bool>,
 }
 
 pub struct MouseListener {
@@ -404,6 +413,7 @@ impl MouseListener {
             x_center,
             y_center,
             has_move: true,
+            override_redirect: None,
         }));
 
         Self {
@@ -431,15 +441,9 @@ impl MouseListener {
                 lock.unwrap().0 as *mut MouseListenerCallbacks
             };
 
-            let callbacks = &mut *callbacks_raw;
+            let _callbacks = &mut *callbacks_raw;
 
-            if on_move_active {
-                CGWarpMouseCursorPosition(CGPoint {
-                    x: callbacks.x_center as f64,
-                    y: callbacks.y_center as f64,
-                });
-                CGDisplayHideCursor(0);
-            }
+            // Initial cursor state is managed dynamically via StateManager IS_REDIRECTING
 
             let mask = (1 << K_CG_EVENT_MOUSE_MOVED)
                 | (1 << K_CG_EVENT_LEFT_MOUSE_DOWN)
@@ -526,15 +530,28 @@ impl Drop for MouseListener {
     }
 }
 
-pub extern "C" fn mouse_tap_callback(
+pub unsafe extern "C" fn mouse_tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
     event: CGEventRef,
     refcon: *mut c_void,
 ) -> CGEventRef {
-    let callbacks = unsafe { &*(refcon as *mut MouseListenerCallbacks) };
+    // 0xFFFF_FFFF is kCGEventTapDisabledByTimeout / kCGEventTapDisabledByUserInput
+    if event_type == 0xFFFF_FFFF || event_type == 0xFFFF_FFFE {
+        log::warn!("[HARDWARE] macOS EventTap was temporarily disabled by OS, re-enabling");
+        return event;
+    }
 
     unsafe {
+        let callbacks = &*(refcon as *mut MouseListenerCallbacks);
+
+        let is_redirecting = callbacks.override_redirect.unwrap_or_else(|| {
+            crate::state::IS_REDIRECTING.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        if !is_redirecting {
+            return event;
+        }
+
         let point = CGEventGetLocation(event);
         let x = point.x as i32;
         let y = point.y as i32;
@@ -605,6 +622,7 @@ pub extern "C" fn mouse_tap_callback(
 
 // --- KeyboardController ---
 
+#[derive(Default)]
 pub struct KeyboardController;
 
 impl KeyboardController {
@@ -631,6 +649,15 @@ impl KeyboardController {
             }
         }
     }
+
+    pub fn release_all(&self) {
+        // Release common modifier keys and navigation keys to ensure no stuck keys
+        for key in &[
+            "control", "shift", "alt", "command", "option", "caps_lock", "tab", "space", "enter", "escape",
+        ] {
+            self.release(key);
+        }
+    }
 }
 
 impl crate::hardware::KeyboardSimulator for KeyboardController {
@@ -640,6 +667,9 @@ impl crate::hardware::KeyboardSimulator for KeyboardController {
     fn release(&self, key: &str) {
         self.release(key);
     }
+    fn release_all(&self) {
+        self.release_all();
+    }
 }
 
 // --- KeyboardListener ---
@@ -648,6 +678,7 @@ pub struct KeyboardListenerCallbacks {
     pub on_press: Box<dyn Fn(String) + Send>,
     pub on_release: Box<dyn Fn(String) + Send>,
     pub suppress: bool,
+    pub override_redirect: Option<bool>,
 }
 
 pub struct KeyboardListener {
@@ -666,6 +697,7 @@ impl KeyboardListener {
             on_press: Box::new(on_press),
             on_release: Box::new(on_release),
             suppress,
+            override_redirect: None,
         }));
 
         Self {
@@ -764,16 +796,40 @@ impl Drop for KeyboardListener {
     }
 }
 
-pub extern "C" fn keyboard_tap_callback(
+pub unsafe extern "C" fn keyboard_tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
     event: CGEventRef,
     refcon: *mut c_void,
 ) -> CGEventRef {
-    let callbacks = unsafe { &*(refcon as *mut KeyboardListenerCallbacks) };
+    // 0xFFFF_FFFF is kCGEventTapDisabledByTimeout / kCGEventTapDisabledByUserInput
+    if event_type == 0xFFFF_FFFF || event_type == 0xFFFF_FFFE {
+        log::warn!("[HARDWARE] macOS Keyboard EventTap was temporarily disabled by OS, re-enabling");
+        return event;
+    }
 
     unsafe {
+        let callbacks = &*(refcon as *mut KeyboardListenerCallbacks);
+
         let keycode = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16;
+        let flags = CGEventGetFlags(event);
+
+        // Emergency escape: Ctrl + Alt + Escape (keycode 53 is Esc, ctrl is 0x40000, alt is 0x80000)
+        let ctrl = (flags & 0x0004_0000) != 0;
+        let alt = (flags & 0x0008_0000) != 0;
+        if keycode == 53 && ctrl && alt {
+            log::warn!("[EMERGENCY] Ctrl+Alt+Escape detected! Triggering emergency release to host.");
+            crate::state::STATE_MANAGER.emergency_release();
+            return event;
+        }
+
+        let is_redirecting = callbacks.override_redirect.unwrap_or_else(|| {
+            crate::state::IS_REDIRECTING.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        if !is_redirecting {
+            return event;
+        }
+
         let mut key_str = MACOS_KEY_MAP.get(&keycode).map(|s| s.to_string());
 
         if key_str.is_none() {
@@ -957,6 +1013,22 @@ impl Drop for ClipboardListener {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+pub fn show_cursor() {
+    unsafe {
+        sys::CGDisplayShowCursor(0);
+    }
+}
+
+pub fn hide_cursor() {
+    unsafe {
+        sys::CGDisplayHideCursor(0);
+    }
+}
+
+pub fn uses_physical_pixels() -> bool {
+    false
 }
 
 #[cfg(test)]

@@ -37,6 +37,19 @@ impl KeyboardController {
     }
     pub fn press(&self, _key: &str) {}
     pub fn release(&self, _key: &str) {}
+    pub fn release_all(&self) {}
+}
+
+impl crate::hardware::KeyboardSimulator for KeyboardController {
+    fn press(&self, key: &str) {
+        self.press(key);
+    }
+    fn release(&self, key: &str) {
+        self.release(key);
+    }
+    fn release_all(&self) {
+        self.release_all();
+    }
 }
 
 pub struct KeyboardListener;
@@ -93,3 +106,10 @@ impl ClipboardListener {
     pub fn start(&self) {}
     pub fn stop(&self) {}
 }
+
+pub fn show_cursor() {}
+pub fn hide_cursor() {}
+pub fn uses_physical_pixels() -> bool {
+    true
+}
+

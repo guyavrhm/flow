@@ -8,12 +8,14 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct UdpServer {
     pub(crate) socket: Arc<UdpSocket>,
+    handshake_lock: Arc<Mutex<()>>,
 }
 
 impl UdpServer {
     pub fn from_socket(socket: UdpSocket) -> Self {
         Self {
             socket: Arc::new(socket),
+            handshake_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -21,6 +23,7 @@ impl UdpServer {
         let socket = UdpSocket::bind("0.0.0.0:8118")?;
         Ok(Self {
             socket: Arc::new(socket),
+            handshake_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -29,11 +32,16 @@ impl UdpServer {
         client_ip: &str,
         cryptor: &crate::crypto::UdpCryptor,
     ) -> std::io::Result<std::net::SocketAddr> {
-        log::debug!("UDP Server: Listening for handshake from {}", client_ip);
-        self.socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+        let _lock = self.handshake_lock.lock().unwrap();
+        log::info!("[UDP] Server waiting for handshake pulse from client [{}]...", client_ip);
+        self.socket.set_read_timeout(Some(Duration::from_millis(150)))?;
 
         let mut buf = [0u8; 1024];
         let start_time = std::time::Instant::now();
+        let mut result = Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("UDP handshake timed out waiting for client [{}]", client_ip),
+        ));
 
         while start_time.elapsed() < Duration::from_secs(3) {
             match self.socket.recv_from(&mut buf) {
@@ -46,9 +54,18 @@ impl UdpServer {
 
                             if let Ok(decrypted) = cryptor.decrypt(seq, &buf[8..len]) {
                                 if decrypted == b"." {
-                                    self.socket.set_read_timeout(None)?;
-                                    log::info!("UDP Handshake: Succeeded for client endpoint: {}", addr);
-                                    return Ok(addr);
+                                    // Send ACK back to client endpoint
+                                    if let Ok(ack_cipher) = cryptor.encrypt(0, b"ACK") {
+                                        let mut ack_packet = Vec::with_capacity(8 + ack_cipher.len());
+                                        ack_packet.extend_from_slice(&0u64.to_be_bytes());
+                                        ack_packet.extend_from_slice(&ack_cipher);
+                                        // Send twice for packet loss tolerance
+                                        let _ = self.socket.send_to(&ack_packet, addr);
+                                        let _ = self.socket.send_to(&ack_packet, addr);
+                                    }
+                                    log::info!("[UDP] Handshake verified: Client [{}] matched endpoint {}, sent ACK", client_ip, addr);
+                                    result = Ok(addr);
+                                    break;
                                 }
                             }
                         }
@@ -58,17 +75,18 @@ impl UdpServer {
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    break;
+                    // Small timeout slice to allow cooperative cancellation
+                    continue;
                 }
                 Err(_) => {}
             }
         }
 
-        self.socket.set_read_timeout(None)?;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "UDP handshake timed out",
-        ))
+        let _ = self.socket.set_read_timeout(None);
+        if result.is_err() {
+            log::warn!("[UDP] Handshake timed out waiting for pulse from client [{}]", client_ip);
+        }
+        result
     }
 
     pub fn send_event(
@@ -124,9 +142,42 @@ impl UdpClient {
         packet.extend_from_slice(&0u64.to_be_bytes());
         packet.extend_from_slice(&ciphertext);
 
-        // Send handshake packet
-        socket.send_to(&packet, &server_dest)?;
-        log::info!("UDP Client sent handshake to {}", server_dest);
+        log::info!("[UDP] Client initiating handshake with server at {}...", server_dest);
+        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+
+        let mut ack_received = false;
+        let mut resp_buf = [0u8; 1024];
+
+        for attempt in 1..=60 {
+            let _ = socket.send_to(&packet, &server_dest);
+
+            match socket.recv_from(&mut resp_buf) {
+                Ok((len, _)) if len > 8 => {
+                    let mut seq_bytes = [0u8; 8];
+                    seq_bytes.copy_from_slice(&resp_buf[0..8]);
+                    let seq = u64::from_be_bytes(seq_bytes);
+
+                    if let Ok(decrypted) = cryptor.decrypt(seq, &resp_buf[8..len]) {
+                        if decrypted == b"ACK" {
+                            log::info!("[UDP] Client received ACK from server on attempt #{}. Handshake confirmed!", attempt);
+                            ack_received = true;
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !ack_received {
+            log::error!("[UDP] Client failed to receive handshake ACK from server at {}", server_dest);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("Failed to receive UDP ACK from server [{}] after 60 attempts", server_ip),
+            ));
+        }
+
+        socket.set_read_timeout(Some(Duration::from_millis(500)))?;
 
         {
             let mut s = self.socket.lock().unwrap();
@@ -204,7 +255,13 @@ impl UdpClient {
                                                 }
                                             }
                                             InputEvent::Stop => {
-                                                log::info!("UDP Client: Received stop command from server");
+                                                log::info!("UDP Client: Received stop command from server - releasing inputs");
+                                                mouse.release("left");
+                                                mouse.release("right");
+                                                mouse.release("middle");
+                                                mouse.release("x1");
+                                                mouse.release("x2");
+                                                keyboard.release_all();
                                             }
                                         }
                                     } else {
@@ -254,7 +311,7 @@ pub fn format_event(event: &InputEvent) -> String {
 }
 
 pub fn parse_event(s: &str) -> Option<InputEvent> {
-    let parts: Vec<&str> = s.split_whitespace().collect();
+    let parts: Vec<&str> = s.splitn(3, ' ').collect();
     if parts.is_empty() {
         return None;
     }

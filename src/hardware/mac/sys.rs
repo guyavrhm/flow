@@ -44,7 +44,7 @@ pub type CFRunLoopRef = *mut c_void;
 pub type CFRunLoopSourceRef = *mut c_void;
 pub type CGEventTapProxy = *mut c_void;
 
-pub type CGEventTapCallBack = extern "C" fn(
+pub type CGEventTapCallBack = unsafe extern "C" fn(
     proxy: CGEventTapProxy,
     event_type: u32,
     event: CGEventRef,

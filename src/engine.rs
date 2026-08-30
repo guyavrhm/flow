@@ -188,27 +188,30 @@ impl AppEngine {
     fn start_server(&self, settings: SettingsData) {
         log::info!("Starting Server Mode");
 
-        // Initialize server monitors in DB if monitors table is empty of main screens
-        if let Ok(server_mons) = crate::config::get_all_monitor_layouts() {
-            let has_server_mon = server_mons.iter().any(|m| m.host == "main");
-            if !has_server_mon {
-                let local_mons = crate::hardware::get_monitors();
-                for m in local_mons {
-                    let layout = crate::config::MonitorLayout {
-                        monitor_id: format!("main_{}", m.name),
-                        host: "main".to_string(),
-                        monitor_name: m.name,
-                        x: m.local_x,
-                        y: m.local_y,
-                        width: m.width,
-                        height: m.height,
-                        scale_factor: m.scale_factor,
-                        local_x: m.local_x,
-                        local_y: m.local_y,
-                    };
-                    let _ = crate::config::save_monitor_layout(&layout);
-                }
-            }
+        // Initialize or update server monitors in DB with current display dimensions
+        let existing_layouts = crate::config::get_all_monitor_layouts().unwrap_or_default();
+        let local_mons = crate::hardware::get_monitors();
+        for m in local_mons {
+            let monitor_id = format!("main_{}", m.name);
+            let (x, y) = existing_layouts
+                .iter()
+                .find(|l| l.monitor_id == monitor_id)
+                .map(|l| (l.x, l.y))
+                .unwrap_or((m.local_x, m.local_y));
+
+            let layout = crate::config::MonitorLayout {
+                monitor_id,
+                host: "main".to_string(),
+                monitor_name: m.name,
+                x,
+                y,
+                width: m.width,
+                height: m.height,
+                scale_factor: m.scale_factor,
+                local_x: m.local_x,
+                local_y: m.local_y,
+            };
+            let _ = crate::config::save_monitor_layout(&layout);
         }
 
         let active_clients = self.active_clients.clone();
@@ -233,12 +236,10 @@ impl AppEngine {
         let active_clients_handshake = active_clients.clone();
 
         // TCP callbacks
+        let is_connected_conn = is_connected.clone();
         let on_connect = move |ip: String, metrics: ScreenMetrics, cryptor: crate::crypto::UdpCryptor, connection_id: u64| {
-            log::info!("Server: Client connected: {} (conn_id: {})", ip, connection_id);
-            {
-                let mut conn = is_connected.lock().unwrap();
-                *conn = true;
-            }
+            log::info!("[SERVER] Client TCP connected: {} (conn_id: {}). Waiting for UDP verification...", ip, connection_id);
+            crate::state::STATE_MANAGER.set_peer_state(&ip, crate::state::PeerState::UdpHandshaking);
 
             // Register client monitors in database
             for m in &metrics.monitors {
@@ -280,24 +281,48 @@ impl AppEngine {
             // Perform UDP Handshake in a background task
             let udp_server_task = udp_server_handshake.clone();
             let active_clients_task = active_clients_handshake.clone();
+            let is_connected_task = is_connected_conn.clone();
             let client_ip = ip.clone();
             let cryptor_clone = cryptor.clone();
 
             thread::spawn(move || {
-                if let Ok(udp_addr) = udp_server_task.listen_handshake(&client_ip, &cryptor_clone) {
-                    let mut clients = active_clients_task.lock().unwrap();
-                    clients.insert(
-                        client_ip.clone(),
-                        ClientInfo {
-                            ip: client_ip,
-                            monitors: metrics.monitors.clone(),
-                            uses_physical_pixels: metrics.uses_physical_pixels,
-                            udp_addr: Some(udp_addr),
-                            cryptor: cryptor_clone,
-                            udp_seq: 0,
-                            connection_id,
-                        },
-                    );
+                match udp_server_task.listen_handshake(&client_ip, &cryptor_clone) {
+                    Ok(udp_addr) => {
+                        let mut clients = active_clients_task.lock().unwrap();
+                        clients.insert(
+                            client_ip.clone(),
+                            ClientInfo {
+                                ip: client_ip.clone(),
+                                monitors: metrics.monitors.clone(),
+                                uses_physical_pixels: metrics.uses_physical_pixels,
+                                udp_addr: Some(udp_addr),
+                                cryptor: cryptor_clone.clone(),
+                                udp_seq: 0,
+                                connection_id,
+                            },
+                        );
+
+                        crate::state::STATE_MANAGER.set_peer_state(
+                            &client_ip,
+                            crate::state::PeerState::FullyConnected {
+                                metrics: metrics.clone(),
+                                udp_addr,
+                                cryptor: cryptor_clone,
+                                connection_id,
+                            },
+                        );
+
+                        {
+                            let mut conn = is_connected_task.lock().unwrap();
+                            *conn = true;
+                        }
+                        log::info!("[SERVER] Client [{}] is FULLY CONNECTED (TCP + verified UDP)", client_ip);
+                        crate::state::STATE_MANAGER.request_repaint();
+                    }
+                    Err(e) => {
+                        log::error!("[SERVER] UDP handshake failed for client [{}]: {:?}", client_ip, e);
+                        crate::state::STATE_MANAGER.set_peer_state(&client_ip, crate::state::PeerState::Disconnected);
+                    }
                 }
             });
         };
@@ -305,22 +330,21 @@ impl AppEngine {
         let is_connected_disc = self.is_connected.clone();
         let active_clients_disc = active_clients.clone();
         let current_controlled_disc = current_controlled.clone();
-        let mouse_listener_disc = self.mouse_listener.clone();
-        let keyboard_listener_disc = self.keyboard_listener.clone();
         let clipboard_accumulator_disc = self.clipboard_accumulator.clone();
 
         let on_disconnect = move |ip: String, conn_id: u64| {
-            log::info!("Server: Client disconnected: {} (conn_id: {})", ip, conn_id);
+            log::info!("[SERVER] Client disconnected: {} (conn_id: {})", ip, conn_id);
             let mut clients = active_clients_disc.lock().unwrap();
             
             let should_remove = if let Some(info) = clients.get(&ip) {
                 info.connection_id == conn_id
             } else {
-                false
+                true // If it was never in clients (failed handshake), still clean it up
             };
 
             if should_remove {
                 clients.remove(&ip);
+                crate::state::STATE_MANAGER.remove_peer(&ip);
 
                 if clients.is_empty() {
                     let mut conn = is_connected_disc.lock().unwrap();
@@ -329,19 +353,17 @@ impl AppEngine {
 
                 let mut curr = current_controlled_disc.lock().unwrap();
                 if *curr == ip {
-                    // Revert control to Server
+                    log::warn!("[SERVER] Active controlled client [{}] disconnected. Reverting control to Host!", ip);
                     *curr = "main".to_string();
-                    let mut ml = mouse_listener_disc.lock().unwrap();
-                    *ml = None;
-                    let mut kl = keyboard_listener_disc.lock().unwrap();
-                    *kl = None;
+                    crate::state::STATE_MANAGER.emergency_release();
                 }
 
                 // Clean up progress bar & accumulator
                 crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
                 *clipboard_accumulator_disc.lock().unwrap() = None;
+                crate::state::STATE_MANAGER.request_repaint();
             } else {
-                log::info!("Server: Ignoring disconnect for {} as a newer connection exists", ip);
+                log::info!("[SERVER] Ignoring disconnect for {} as a newer connection exists", ip);
             }
         };
 
@@ -483,24 +505,57 @@ impl AppEngine {
                     let udp_client_conn = udp_client.clone();
                     let server_ip_conn = server_ip.clone();
                     let on_connect = move |key: [u8; 32], salt: [u8; 4]| {
-                        log::info!("Client: Connected to server");
-                        {
-                            let mut conn = is_connected_conn.lock().unwrap();
-                            *conn = true;
+                        log::info!("[CLIENT] TCP connected to server. Initializing verified UDP handshake...");
+                        crate::state::STATE_MANAGER.set_peer_state(&server_ip_conn, crate::state::PeerState::UdpHandshaking);
+
+                        match udp_client_conn.start(&server_ip_conn, key, salt) {
+                            Ok(()) => {
+                                log::info!("[CLIENT] Fully connected and verified with server at {}!", server_ip_conn);
+                                {
+                                    let mut conn = is_connected_conn.lock().unwrap();
+                                    *conn = true;
+                                }
+                                crate::state::STATE_MANAGER.set_peer_state(
+                                    &server_ip_conn,
+                                    crate::state::PeerState::FullyConnected {
+                                        metrics: ScreenMetrics {
+                                            width: 0,
+                                            height: 0,
+                                            monitors: Vec::new(),
+                                            uses_physical_pixels: false,
+                                        },
+                                        udp_addr: "0.0.0.0:8118".parse().unwrap(),
+                                        cryptor: crate::crypto::UdpCryptor::new(&key, salt),
+                                        connection_id: 0,
+                                    },
+                                );
+                                crate::state::STATE_MANAGER.request_repaint();
+                            }
+                            Err(e) => {
+                                log::error!("[CLIENT] UDP handshake with server failed: {:?}", e);
+                                {
+                                    let mut conn = is_connected_conn.lock().unwrap();
+                                    *conn = false;
+                                }
+                                crate::state::STATE_MANAGER.set_peer_state(&server_ip_conn, crate::state::PeerState::Disconnected);
+                                crate::state::STATE_MANAGER.request_repaint();
+                            }
                         }
-                        let _ = udp_client_conn.start(&server_ip_conn, key, salt);
                     };
 
                     let is_connected_disc = is_connected.clone();
                     let udp_client_disc = udp_client.clone();
                     let clipboard_accumulator_disc = clipboard_accumulator_client.clone();
+                    let server_ip_disc = server_ip.clone();
                     let on_disconnect = move || {
-                        log::info!("Client: Disconnected from server");
+                        log::info!("[CLIENT] Disconnected from server");
                         {
                             let mut conn = is_connected_disc.lock().unwrap();
                             *conn = false;
                         }
                         udp_client_disc.stop();
+                        crate::state::STATE_MANAGER.remove_peer(&server_ip_disc);
+                        crate::state::STATE_MANAGER.request_repaint();
                         crate::hardware::CLIPBOARD_SYNC_PROGRESS.store(0, std::sync::atomic::Ordering::Relaxed);
                         *clipboard_accumulator_disc.lock().unwrap() = None;
                     };

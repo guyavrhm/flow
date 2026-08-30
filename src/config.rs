@@ -105,6 +105,10 @@ pub fn initialize_db() -> Result<()> {
         [],
     )?;
 
+    // Prune obsolete loopback 127.0.0.1 entries from previous local test runs to prevent duplicate screen ghosts
+    let _ = conn.execute("DELETE FROM monitors WHERE host = '127.0.0.1'", []);
+    let _ = conn.execute("DELETE FROM screens WHERE address = '127.0.0.1'", []);
+
     Ok(())
 }
 

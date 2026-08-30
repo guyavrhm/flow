@@ -21,6 +21,8 @@ graph TD
     Main[src/main.rs] --> UI[src/ui.rs]
     Main --> Engine[src/engine.rs]
     UI --> Engine
+    UI --> State[src/state.rs]
+    Engine --> State
     Engine --> Tracker[src/engine/tracker.rs]
     Engine --> ClipboardMod[src/engine/clipboard.rs]
     Engine --> Layout[src/engine/layout.rs]
@@ -34,6 +36,7 @@ graph TD
 ```
 
 * **[src/main.rs](src/main.rs):** Entry point. Initializes the SQLite DB cache, GTK (on Linux), and starts the `egui` native loop.
+* **[src/state.rs](src/state.rs):** Centralized state manager. Serves as the single source of truth for peer connection phases (`PeerState`), KVM input redirection state (`InputControlState`), atomic input tap flags (`IS_REDIRECTING`), and UI frame repaints.
 * **[src/engine.rs](src/engine.rs):** Entry point for the coordinator engine state. Delegates tracking and clipboard sync to dedicated sub-modules.
 * **[src/engine/](src/engine/):** Engine sub-modules:
   * **[layout.rs](src/engine/layout.rs):** Renders coordinate translation/projection, clamping, and monitor boundary queries.
@@ -68,32 +71,37 @@ sequenceDiagram
     ClientA->>Server: TCP Connection (Port 8118) + ClientHello
     Server-->>ClientA: ServerHello + Self-Signed X.509 Certificate
     Note over ClientA: Calculates SHA-256 Fingerprint
-    Note over ClientA: Checks SQLite DB (TOFU). Prompts user if new.
+    Note over ClientA: Checks SQLite DB (TOFU). If fingerprint changed: Security Alert!
     ClientA-->>Server: Client Certificate (mTLS)
     Note over Server: Calculates Client Certificate Fingerprint
-    Note over Server: Checks SQLite DB (TOFU). Prompts user if new.
+    Note over Server: Checks SQLite DB (TOFU). Prompts user if untrusted/mismatched.
     
     Note over Server: Server generates 32-byte Key & 4-byte Salt
     Server->>ClientA: UdpSessionConfig (JSON over TLS TCP)
     ClientA->>Server: Send ScreenMetrics (JSON over TLS TCP)
     
-    Note over ClientA, Server: UDP Handshake
-    ClientA->>Server: UDP packet with "." encrypted with Key/Salt (Seq 0)
-    Note over Server: Decrypts with Client Cryptor, registers client UDP Port
+    Note over ClientA, Server: Reliable UDP Handshake (Pulse & ACK)
+    loop Up to 30 pulses every 100ms
+        ClientA->>Server: UDP packet with "." encrypted with Key/Salt (Seq 0)
+        Server-->>ClientA: UDP packet with "ACK" encrypted with Key/Salt (Seq 0)
+    end
+    Note over ClientA, Server: Both nodes transition to PeerState::FullyConnected!
     
     Note over ClientB, Server: TLS 1.3 Handshake & Handshake (Client B)
 
-    Note over ClientA, Server: Input Redirection Flow (Mouse reaches edge)
-    Note over Server: Install Input Hooks (Swallow local inputs)
+    Note over Server: Persistent Input Hooks are ACTIVE on Host (Pass-through mode)
+    Note over Server: Virtual cursor reaches active screen border
+    Note over Server: StateManager::request_transition() checks FullyConnected
+    Note over Server: IS_REDIRECTING set to true (Inputs swallowed & forwarded)
     loop Every Move/Click/Scroll/Keypress
         Note over Server: Increment sequence number (nonce counter)
         Server->>ClientA: Send InputEvent (UDP: [8-byte seq] [ChaCha20-Poly1305 payload])
         Note over ClientA: Verify seq (sliding window) & decrypt. Inject event.
     end
 
-    Note over Server: Virtual cursor reaches client edge to return
+    Note over Server: Mouse crosses back into Host OR user presses Ctrl+Alt+Escape
     Server->>ClientA: Send InputEvent::Stop (UDP)
-    Note over Server: Uninstall Input Hooks (Resume local inputs)
+    Note over Server: IS_REDIRECTING set to false (Native cursor restored to host)
 
     Note over ClientB, Server: Clipboard Sharing (All sides poll local clipboard every 1s)
     ClientB->>Server: Send ClipboardPayload (TLS TCP)
@@ -138,10 +146,11 @@ To demarcate JSON payloads sent over the stream, each message is transmitted wit
 
 UDP is used for low-latency transmission of high-frequency input events.
 
-#### UDP Handshake
-To bind client/server UDP sockets:
-* The client sends a UDP packet containing a handshake signature: the character `.` encrypted with `UdpCryptor` at sequence number `0`.
-* The server decrypts and verifies the packet using the client's cryptor to register the client's public UDP socket endpoint (`SocketAddr`).
+#### UDP Handshake (Pulse & ACK)
+To reliably bind client/server UDP sockets across lossy networks:
+* The client sends a UDP packet containing a handshake signature: the character `.` encrypted with `UdpCryptor` at sequence number `0`, pulsed every 100ms for up to 30 attempts.
+* The server decrypts and verifies the packet, registers the client's public UDP socket endpoint (`SocketAddr`), and responds with an encrypted `b"ACK"` payload.
+* Upon receiving the `ACK`, both nodes mutually transition to `PeerState::FullyConnected`.
 
 #### Input Event Payload Format
 All input events are sent as secure UDP packets:
@@ -156,8 +165,33 @@ Once decrypted, the payload follows a space-delimited text protocol:
 | `mov <x> <y>` | Warps mouse to coordinates `x`, `y` | `mov 1280 720` |
 | `scrl <dx> <dy>` | Simulates mouse scroll wheel offsets | `scrl 0 -120` |
 | `prsm <pressed> <button>` | Simulates mouse click event (`pressed` is `true`/`false`, `button` is e.g. `Left`, `Right`) | `prsm true Left` |
-| `prsk <pressed> <key>` | Simulates key press/release (`pressed` is `true`/`false`, `key` is key string identifier) | `prsk false Shift` |
+| `prsk <pressed> <key>` | Simulates key press/release (`pressed` is `true`/`false`, `key` is key string identifier, e.g. spacebar `' '`) | `prsk false Shift` |
 | `stp` | Directs the client to stop capturing inputs and returns focus to the server | `stp` |
+
+### 4.3 Centralized State Manager (`src/state.rs`)
+
+To eliminate state fragmentation, race conditions, and UI synchronization lag, `flow` uses a central state coordinator:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Connecting: TCP Connect (Port 8118)
+    Connecting --> PendingTrustApproval: Unknown / Mismatched Fingerprint
+    Connecting --> TlsEstablished: Fingerprint Matches Known Hosts
+    PendingTrustApproval --> TlsEstablished: User Approves Trust
+    PendingTrustApproval --> Disconnected: User Rejects / 60s Timeout
+    TlsEstablished --> UdpHandshaking: Exchange Config & Metrics
+    UdpHandshaking --> FullyConnected: Pulse Received & ACK Verified
+    UdpHandshaking --> Disconnected: Handshake Timeout
+    FullyConnected --> Disconnected: Connection Closed / Socket Dropped
+    Disconnected --> [*]
+```
+
+#### State Enforcement & Safety Invariants
+1. **Transition Guard**: The edge tracker can **only** transition the cursor to a peer if its state is strictly `PeerState::FullyConnected`.
+2. **Atomic Pass-Through**: Low-level OS event taps check `IS_REDIRECTING` in sub-microsecond time. When `false`, all mouse and keyboard events pass through natively without cursor warping or suppression.
+3. **Emergency Escape**: If control ever becomes trapped, pressing **`Ctrl + Alt + Escape`** trips `FORCE_EMERGENCY_RELEASE`, breaks input redirection immediately, restores the native mouse cursor, and returns focus to the host.
+4. **Coordinate Clamping**: Coordinates outside monitor boundaries are clamped to the nearest edge of the active screen, preventing the mouse from drifting into unreachable virtual coordinates.
+5. **Instant UI Repaints**: The state manager holds the `egui::Context` reference and invokes `request_repaint()` on any state transition, ensuring instant UI visual updates without polling delays.
 
 ---
 
@@ -186,19 +220,33 @@ Once decrypted, the payload follows a space-delimited text protocol:
 | **UDP Client Thread** | udp.rs | Listens on a UDP socket for real-time input events (`Move`, `KeyPress`, `Stop`), decrypts them, and immediately simulates them on the local OS. | Active while Client is connected |
 | **Clipboard Listener Thread** | clipboard.rs | Detects local pasteboard updates natively and notifies the sync manager. | Active while Client is running |
 
-### Thread Communication & Shared Data
+### 5.1 Concurrency & State Communication Patterns
+
+Because `flow` operates across real-time hardware taps (1000 Hz), async network tasks, and immediate-mode UI rendering, no single communication primitive fits all requirements. The system employs **four distinct communication patterns**:
+
+| Pattern | Mechanism | Example in `flow` | Why It Is Used |
+|---|---|---|---|
+| **1. Atomic Memory Flags** | Lock-free atomics (`AtomicBool`, `Ordering::Relaxed` / `SeqCst`) | `IS_REDIRECTING`, `FORCE_EMERGENCY_RELEASE` | **Sub-Microsecond OS Event Taps (1000 Hz)**<br>Native Quartz/evdev callbacks cannot acquire mutexes or block on channels without introducing cursor lag or risking OS thread watchdog kills. Checked in nanoseconds. |
+| **2. Mutex-Guarded State Machine** | Thread-safe state structures (`Arc<Mutex<PeerState>>`) | `STATE_MANAGER.peers`, `request_transition()` | **Engine & Tracker Logic (10ms Loop)**<br>Maintains the rich single source of truth (`Connecting`, `FullyConnected`, monitor bounds). Enforces strict transition safety invariants. |
+| **3. One-Shot Channels (Pipes)** | Memory conduits (`std::sync::mpsc::channel()`, `tx` / `rx`) | Certificate TOFU approval, Clipboard lazy promises | **Thread Rendezvous & Waiting**<br>Used when a background worker thread *must physically pause and sleep* consuming 0% CPU until another thread (e.g. human clicking "Trust" in UI) responds. |
+| **4. Reactive Wakeup Handles** | Event-loop interrupt handles (`egui::Context::request_repaint()`) | `STATE_MANAGER.request_repaint()` | **Immediate-Mode UI Reactivity**<br>The UI registers a clone of its event loop handle in the `StateManager`. Any background thread can immediately wake the UI from its sleep loop without polling delays. |
+
+### 5.2 Thread Communication & Shared Data
 
 State variables are synchronized across thread boundaries using lock-protected reference counters (`Arc<Mutex<T>>`):
 
 | Shared Variable | Type | Written By | Read By | Purpose |
 |---|---|---|---|---|
+| **`STATE_MANAGER`** | `Lazy<Arc<StateManager>>` | Network, TLS, Tracker, UI | All threads | Central coordinator holding `PeerState`, `InputControlState`, active monitor layouts, and `egui::Context`. |
+| **`IS_REDIRECTING`** | `AtomicBool` | StateManager, Edge Tracker | OS Input Tap Callbacks | High-frequency atomic flag queried by Quartz/evdev hooks to enable/bypass input interception in sub-microsecond time. |
+| **`FORCE_EMERGENCY_RELEASE`** | `AtomicBool` | Keyboard hook (Ctrl+Alt+Esc) | Edge Tracker | Signals the background tracker loop to immediately break redirection and return focus to host. |
 | **`settings`** | `Arc<Mutex<SettingsData>>` | Main UI Thread | Edge Tracker, TCP/UDP threads | Stores mode (Server/Client), Server IP, and encryption password. |
 | **`is_running`** | `Arc<Mutex<bool>>` | Main UI Thread | All background threads | Controls engine startup, teardown, and reloading loops. |
 | **`global_mouse_x`** | `Arc<Mutex<i32>>` | Edge Tracker, Mouse Hook | Edge Tracker | Tracks the virtual mouse X coordinate in the global coordinated desktop space. |
 | **`global_mouse_y`** | `Arc<Mutex<i32>>` | Edge Tracker, Mouse Hook | Edge Tracker | Tracks the virtual mouse Y coordinate in the global coordinated desktop space. |
 | **`active_clients`** | `Arc<Mutex<HashMap<...>>>` | TCP connection threads | Edge Tracker | Tracks connected client monitors configuration, DPI scaling parameters, and UDP endpoints. |
 | **`current_controlled`** | `Arc<Mutex<String>>` | Edge Tracker | OS Input Hooks | Tracks which screen holds input focus (`"main"` or client IP). |
-| **`is_connected`** | `Arc<Mutex<bool>>` | TCP threads | Main UI Thread | Drives visual tray connection status indicators ($V$ / $X$). |
+| **`is_connected`** | `Arc<Mutex<bool>>` | TCP threads, StateManager | Main UI Thread | Drives visual tray connection status indicators ($V$ / $X$). |
 | **`udp_server`** | `Arc<Mutex<Option<UdpServer>>>` | Main UI Thread | Edge Tracker | Stores the server's UDP socket reference to send input event packets. |
 | **`CLIPBOARD_IGNORE_HASHES`** | `Lazy<Mutex<Vec<u64>>>` | TCP connection threads & FFI promise threads | Clipboard listener (`on_change` in engine.rs) | Stores hashes of recent network-received clipboard contents (both eager and lazy updates) to prevent network loopbacks. |
 | **`IN_SET_CLIPBOARD`** | `AtomicBool` | TCP connection threads | Clipboard listener | Guard variable set during eager sync updates to temporarily pause the clipboard change listener and prevent race condition loopbacks. |
@@ -217,13 +265,17 @@ State variables are synchronized across thread boundaries using lock-protected r
 
 Low-level OS FFI imports, Carbon/Quartz wrappers, and synchronous platform-specific FFI callbacks (e.g., Cocoa `NSPasteboard` owners) are isolated into native driver submodules (such as [src/hardware/mac/sys.rs](file:///Users/guyavraham/flow/src/hardware/mac/sys.rs)).
 
-#### 1. Screen & Keyboard Initialization Functions
+#### 1. Screen, Cursor & Platform Display Functions
 * **`pub fn get_screeninfo() -> (i32, i32)`**
   * Returns the primary screen width and height in pixels.
 * **`pub fn get_monitors() -> Vec<MonitorInfo>`**
   * Returns the active display geometries (DPI scale factors, bounds, and names) for the host machine.
 * **`pub fn init_keyboard_layout()`**
   * Invoked on the main thread during app startup to cache keyboard layouts if required by the target OS.
+* **`pub fn show_cursor()` / `pub fn hide_cursor()`**
+  * Safely manages native host cursor visibility through the HAL without exposing raw platform FFI (`CGDisplayShowCursor`, Win32 `ShowCursor`) to business logic.
+* **`pub fn uses_physical_pixels() -> bool`**
+  * Determines whether the platform's input injection layer operates in physical pixels (`true` for Windows and Linux `evdev`) or resolution-independent logical points (`false` for macOS Retina).
 
 #### 2. ClipboardController Struct
 Manages reading from and writing to the OS clipboard.
@@ -372,5 +424,5 @@ pub mod <your_os>;
 #[cfg(target_os = "<your_os>")]
 pub use <your_os>::{
     ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout, ClipboardListener,
+    init_keyboard_layout, ClipboardListener, show_cursor, hide_cursor, uses_physical_pixels,
 };

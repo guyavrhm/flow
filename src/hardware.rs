@@ -18,6 +18,7 @@ pub trait MouseSimulator: Send + Sync {
 pub trait KeyboardSimulator: Send + Sync {
     fn press(&self, key: &str);
     fn release(&self, key: &str);
+    fn release_all(&self);
 }
 
 pub trait InputHookListener: Send + Sync {
@@ -122,19 +123,19 @@ impl PromisedClipboard {
 #[cfg(target_os = "macos")]
 pub use mac::{
     ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout, ClipboardListener, get_monitors,
+    init_keyboard_layout, ClipboardListener, get_monitors, show_cursor, hide_cursor, uses_physical_pixels,
 };
 
 #[cfg(target_os = "windows")]
 pub use win::{
     ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout, ClipboardListener, get_monitors,
+    init_keyboard_layout, ClipboardListener, get_monitors, show_cursor, hide_cursor, uses_physical_pixels,
 };
 
 #[cfg(target_os = "linux")]
 pub use linux::{
     ClipboardController, KeyboardController, KeyboardListener, MouseController, MouseListener, get_screeninfo,
-    init_keyboard_layout, ClipboardListener, get_monitors,
+    init_keyboard_layout, ClipboardListener, get_monitors, show_cursor, hide_cursor, uses_physical_pixels,
 };
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

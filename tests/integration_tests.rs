@@ -391,6 +391,7 @@ mod macos_tests {
             x_center: 960,
             y_center: 540,
             has_move: true,
+            override_redirect: Some(true),
         }));
 
         unsafe {
@@ -452,6 +453,7 @@ mod macos_tests {
                 *r = Some(key);
             }),
             suppress: true,
+            override_redirect: Some(true),
         }));
 
         unsafe {

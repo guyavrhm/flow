@@ -381,7 +381,7 @@ impl TcpClient {
             // Send screen metrics to server
             let screen = crate::hardware::get_screeninfo();
             let monitors = crate::hardware::get_monitors();
-            let uses_physical_pixels = cfg!(not(target_os = "macos"));
+            let uses_physical_pixels = crate::hardware::uses_physical_pixels();
             let metrics = ScreenMetrics {
                 width: screen.0,
                 height: screen.1,
