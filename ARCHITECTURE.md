@@ -18,14 +18,14 @@ The project is structured logically into separate systems:
 
 ```mermaid
 graph TD
-    Main[src/main.rs] --> UI[src/ui/mod.rs]
+    Main[src/main.rs] --> UI[src/ui.rs]
     Main --> Engine[src/engine.rs]
     UI --> Engine
     Engine --> Tracker[src/engine/tracker.rs]
     Engine --> ClipboardMod[src/engine/clipboard.rs]
     Engine --> Layout[src/engine/layout.rs]
-    Engine --> Network[src/network]
-    Engine --> Hardware[src/hardware]
+    Engine --> Network[src/network.rs]
+    Engine --> Hardware[src/hardware.rs]
     Network --> Protocol[src/network/protocol.rs]
     Network --> TCP[src/network/tcp.rs]
     Network --> UDP[src/network/udp.rs]
@@ -39,19 +39,16 @@ graph TD
   * **[layout.rs](src/engine/layout.rs):** Renders coordinate translation/projection, clamping, and monitor boundary queries.
   * **[tracker.rs](src/engine/tracker.rs):** Performs low-latency edge tracking, KVM transitions, and hooks system mouse/keyboard events.
   * **[clipboard.rs](src/engine/clipboard.rs):** Manages local clipboard change notifications, reassembly chunks, and streaming payload promises.
-* **[src/network/](src/network/):** Networking module stack:
-  * **[mod.rs](src/network/mod.rs):** Exposes network submodules, provides local IP utilities, and initializes the global asynchronous `TOKIO_RUNTIME`.
+* **[src/network.rs](src/network.rs):** Networking module stack: Exposes network submodules, provides local IP utilities, and initializes the global asynchronous `TOKIO_RUNTIME`.
   * **[tcp.rs](src/network/tcp.rs):** Manages connection handshakes, screen metrics exchange, and clipboard synchronization.
   * **[udp.rs](src/network/udp.rs):** Runs the low-latency network pipeline for high-frequency input events.
   * **[protocol.rs](src/network/protocol.rs):** Defines network serialization structs (`InputEvent`, `ClipboardPayload`, `ScreenMetrics`).
   * **[tls.rs](src/network/tls.rs):** Custom Trust-On-First-Use (TOFU) mutual TLS verifiers (`TofuServerVerifier` and `TofuClientVerifier`) and PEM loading helpers.
-* **[src/hardware/](src/hardware/):** Hardware input capture and simulation stack:
-  * **[mod.rs](src/hardware/mod.rs):** Manages conditional compilation (`#[cfg(target_os)]`) to dynamically select and export the correct OS-specific FFI backend at build time.
+* **[src/hardware.rs](src/hardware.rs):** Hardware input capture and simulation stack: Manages conditional compilation (`#[cfg(target_os)]`) to dynamically select and export the correct OS-specific FFI backend at build time.
   * **Platform Backends:** Platform-specific FFI modules (`mac.rs`, `win.rs`, `linux.rs`) implementing OS-specific hooks and input injection.
 * **[src/crypto.rs](src/crypto.rs):** Handles self-signed X.509 certificate generation/loading, SHA-256 fingerprint computation, sliding window replay protection for UDP packets, and symmetric ChaCha20-Poly1305 encryption/decryption.
 * **[src/config.rs](src/config.rs):** SQLite database layer (`rusqlite`) for saving settings and global monitor layouts.
-* **[src/ui/](src/ui/):** Immediate-mode UI layout modules:
-  * **[src/ui/mod.rs](src/ui/mod.rs):** Coordinates the desktop configurations view, polls background status variables, manages tray menu interactions, and executes async engine reloads when settings are saved.
+* **[src/ui.rs](src/ui.rs):** Immediate-mode UI layout coordinator: Coordinates the desktop configurations view, polls background status variables, manages tray menu interactions, and executes async engine reloads when settings are saved.
   * **[src/ui/canvas.rs](src/ui/canvas.rs):** Renders the interactive layout map panel where users drag, drop, and snap virtual monitor borders in the coordinated workspace.
   * **[src/ui/tray.rs](src/ui/tray.rs):** Hooks native platform system tray icons, managing connection status visuals (Checkmark vs. Error indicators).
 
@@ -178,7 +175,7 @@ Once decrypted, the payload follows a space-delimited text protocol:
 | **UDP Handshake Thread (1 per client)** | engine.rs | Created temporarily to wait for the client's UDP handshake packet to extract and store their remote UDP port, then terminates. | Transient (less than 3 seconds) |
 | **Edge Tracking Thread** | tracker.rs | Runs a 10ms loop checking local mouse boundaries. When control shifts, it activates blocking system-level input hooks (listening for mouse/keyboard inputs) and packages them to UDP. | Active while Server is running |
 | **Clipboard Listener Thread** | clipboard.rs | Detects local pasteboard updates natively (e.g. 250ms `changeCount` polling on macOS, window message loops or signals on Windows/Linux) and notifies the sync manager. | Active while Server is running |
-| **Engine Reload Thread** | mod.rs | Spawned briefly when the user hits "Save" to stop the engine and re-initialize socket bindings without freezing the UI thread. | Transient |
+| **Engine Reload Thread** | ui.rs | Spawned briefly when the user hits "Save" to stop the engine and re-initialize socket bindings without freezing the UI thread. | Transient |
 
 ### Client Mode Threads & Tasks (Guest)
 
@@ -211,7 +208,7 @@ State variables are synchronized across thread boundaries using lock-protected r
 
 ## 6. OS-Specific FFI & Hardware Integration
 
-`flow` uses the `src/hardware` module as a Hardware Abstraction Layer (HAL) to standardize cross-platform hardware events and OS windowing hooks (e.g., Win32, Cocoa/Quartz, X11). The HAL is defined using four key traits in [src/hardware/mod.rs](file:///Users/guyavraham/flow/src/hardware/mod.rs):
+`flow` uses the `src/hardware` module as a Hardware Abstraction Layer (HAL) to standardize cross-platform hardware events and OS windowing hooks (e.g., Win32, Cocoa/Quartz, X11). The HAL is defined using four key traits in [src/hardware.rs](file:///Users/guyavraham/flow/src/hardware.rs):
 
 *   **`MouseSimulator`**: Standardizes mouse cursor warping, scrolling, and button clicks.
 *   **`KeyboardSimulator`**: Standardizes keystroke injection.
@@ -366,7 +363,7 @@ To support a new operating system or windowing system, implement a new backend d
 2. Implement the HAL traits (`MouseSimulator`, `KeyboardSimulator`, `InputHookListener`, and `ClipboardManager`) inside your new file.
 3. Expose the concrete driver implementations (`ClipboardController`, `KeyboardController`, `KeyboardListener`, `MouseController`, `MouseListener`, `ClipboardListener`, and screen metrics helpers) that implement these traits.
 4. Implement `pub(crate) fn set_promise_impl(id: &str, format: &str, size: usize)` within your new file to handle registering the platform-specific lazy promise owner.
-5. Expose the new module in `src/hardware/mod.rs` using conditional compilation attributes:
+5. Expose the new module in `src/hardware.rs` using conditional compilation attributes:
 
 ```rust
 #[cfg(target_os = "<your_os>")]
